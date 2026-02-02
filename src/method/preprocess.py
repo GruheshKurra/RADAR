@@ -47,7 +47,11 @@ class EdgeExtractor:
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         sobel_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
 
-        sobel_normalized = (sobel_magnitude / sobel_magnitude.max() * 255).astype(np.uint8)
+        max_val = sobel_magnitude.max()
+        if max_val > 0:
+            sobel_normalized = (sobel_magnitude / max_val).astype(np.float32)
+        else:
+            sobel_normalized = sobel_magnitude.astype(np.float32)
 
         return sobel_normalized
 

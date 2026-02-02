@@ -12,13 +12,21 @@ class RADARConfig:
     patch_size: int = 16
     embed_dim: int = 384
     evidence_dim: int = 64
-    reasoning_iterations: int = 2
+    reasoning_iterations: int = 3
     reasoning_heads: int = 4
     fft_size: int = 112
-    freq_cutoff_divisor: int = 8
     dropout: float = 0.1
-    use_dct: bool = True
-    prediction_feedback: bool = True
+
+
+def _init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
 
 
 class BoundaryArtifactDetector(nn.Module):
@@ -55,6 +63,8 @@ class BoundaryArtifactDetector(nn.Module):
 
         self.classifier = nn.Linear(evidence_dim, 1)
 
+        self.apply(_init_weights)
+
     def forward(self, image: torch.Tensor, patch_features: torch.Tensor,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         assert sobel_cached is not None, "sobel_cached must be provided during training. Use preprocessing."
@@ -75,8 +85,7 @@ class BoundaryArtifactDetector(nn.Module):
 
 
 class FrequencyArtifactDetector(nn.Module):
-    def __init__(self, embed_dim: int = 384, evidence_dim: int = 64,
-                 freq_cutoff_divisor: int = 8, fft_size: int = 112, use_dct: bool = True):
+    def __init__(self, embed_dim: int = 384, evidence_dim: int = 64, fft_size: int = 112):
         super().__init__()
         self.fft_size = fft_size
 
@@ -107,6 +116,8 @@ class FrequencyArtifactDetector(nn.Module):
         )
 
         self.classifier = nn.Linear(evidence_dim, 1)
+
+        self.apply(_init_weights)
 
     def forward(self, raw_image: torch.Tensor, cls_token: torch.Tensor,
                 freq_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -141,6 +152,8 @@ class EvidenceCrossAttention(nn.Module):
         self.out_proj = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout)
 
+        self.apply(_init_weights)
+
     def forward(self, query: torch.Tensor, evidence: torch.Tensor):
         B = query.shape[0]
 
@@ -160,11 +173,9 @@ class EvidenceCrossAttention(nn.Module):
 
 class EvidenceRefinementModule(nn.Module):
     def __init__(self, evidence_dim: int = 64, num_heads: int = 4,
-                 num_iterations: int = 3, dropout: float = 0.1,
-                 prediction_feedback: bool = True):
+                 num_iterations: int = 3, dropout: float = 0.1):
         super().__init__()
         self.num_iterations = num_iterations
-        self.prediction_feedback = prediction_feedback
 
         self.init_proj = nn.Sequential(
             nn.Linear(evidence_dim * 2, evidence_dim),
@@ -175,8 +186,7 @@ class EvidenceRefinementModule(nn.Module):
         self.gru = nn.GRUCell(evidence_dim, evidence_dim)
         self.predictor = nn.Linear(evidence_dim, 1)
 
-        if prediction_feedback:
-            self.feedback_proj = nn.Linear(1, evidence_dim)
+        self.apply(_init_weights)
 
     def forward(self, badm_evidence: torch.Tensor,
                 aadm_evidence: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -193,10 +203,6 @@ class EvidenceRefinementModule(nn.Module):
         for t in range(self.num_iterations):
             context, attn_weights = self.attention(h, evidence_stack)
             attention_history[:, t] = attn_weights
-
-            if self.prediction_feedback and t > 0:
-                feedback = self.feedback_proj(iteration_logits[:, t-1])
-                context = context + feedback
 
             h = self.gru(context, h)
             logit = self.predictor(h)
@@ -233,17 +239,13 @@ class RADAR(nn.Module):
 
         self.badm = BoundaryArtifactDetector(config.embed_dim, config.evidence_dim)
         self.aadm = FrequencyArtifactDetector(
-            config.embed_dim, config.evidence_dim,
-            config.freq_cutoff_divisor, config.fft_size, config.use_dct
+            config.embed_dim, config.evidence_dim, config.fft_size
         )
 
         self.reasoning = EvidenceRefinementModule(
             config.evidence_dim, config.reasoning_heads,
-            config.reasoning_iterations, config.dropout,
-            config.prediction_feedback
+            config.reasoning_iterations, config.dropout
         )
-
-        self.classifier = nn.Linear(config.evidence_dim * 2, 1)
 
     def forward(self, x: torch.Tensor, freq_cached: Optional[torch.Tensor] = None,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -254,15 +256,11 @@ class RADAR(nn.Module):
         badm_out = self.badm(x, patch_features, sobel_cached)
         aadm_out = self.aadm(x, cls_token, freq_cached)
 
-        evidence_concat = torch.cat([badm_out["evidence"], aadm_out["evidence"]], dim=1)
-
         reasoning_out = self.reasoning(badm_out["evidence"], aadm_out["evidence"])
-        external_logit = self.classifier(evidence_concat)
-        main_logit = (reasoning_out["final_logit"] + external_logit) / 2
 
         return {
-            "logit": main_logit,
-            "prob": torch.sigmoid(main_logit),
+            "logit": reasoning_out["final_logit"],
+            "prob": torch.sigmoid(reasoning_out["final_logit"]),
             "badm_logit": badm_out["logit"],
             "badm_score": badm_out["score"],
             "badm_evidence": badm_out["evidence"],

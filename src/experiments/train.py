@@ -7,7 +7,7 @@ from torch.amp import GradScaler, autocast
 from pathlib import Path
 import time
 import json
-from typing import Dict
+from typing import Dict, Tuple
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -16,12 +16,15 @@ from method.loss import LossConfig
 
 
 def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
-                loss_fn, scaler, device: str, gradient_accumulation_steps: int) -> Dict:
+                loss_fn, scaler, device: str, gradient_accumulation_steps: int) -> Tuple[Dict[str, float], int, float]:
     model.train()
     total_losses = {"total": 0, "main": 0, "branch": 0, "orthogonal": 0,
                    "deep_supervision": 0}
     num_batches = 0
+    skipped_batches = 0
     accumulated_batches = 0
+    total_grad_norm = 0.0
+    grad_norm_count = 0
 
     optimizer.zero_grad(set_to_none=True)
 
@@ -43,6 +46,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
             loss = losses["total"] / gradient_accumulation_steps
 
         if not torch.isfinite(loss):
+            skipped_batches += 1
             continue
 
         scaler.scale(loss).backward()
@@ -57,24 +61,25 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
 
         if is_accumulation_step or is_last_batch:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            total_grad_norm += grad_norm.item()
+            grad_norm_count += 1
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             accumulated_batches = 0
 
-    return {k: v / num_batches for k, v in total_losses.items()}
+    avg_grad_norm = total_grad_norm / grad_norm_count if grad_norm_count > 0 else 0.0
+    return {k: v / num_batches for k, v in total_losses.items()}, skipped_batches, avg_grad_norm
 
 
 @torch.inference_mode()
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict:
     model.eval()
 
-    total_samples = len(loader.dataset)
-    all_probs = torch.zeros(total_samples, device=device)
-    all_labels = torch.zeros(total_samples, dtype=torch.long, device=device)
-    current_idx = 0
+    all_probs = []
+    all_labels = []
 
     for batch_data in loader:
         if len(batch_data) == 4:
@@ -90,13 +95,11 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict:
         with autocast(device_type=device, enabled=(device=="cuda")):
             outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached)
 
-        batch_size = outputs["prob"].shape[0]
-        all_probs[current_idx:current_idx + batch_size] = outputs["prob"].squeeze()
-        all_labels[current_idx:current_idx + batch_size] = labels
-        current_idx += batch_size
+        all_probs.append(outputs["prob"].cpu())
+        all_labels.append(labels)
 
-    all_probs = all_probs[:current_idx].cpu().numpy()
-    all_labels = all_labels[:current_idx].cpu().numpy()
+    all_probs = torch.cat(all_probs, dim=0).numpy()
+    all_labels = torch.cat(all_labels, dim=0).numpy()
     all_preds = (all_probs > 0.5).astype(int)
 
     from sklearn.metrics import accuracy_score, roc_auc_score
@@ -124,14 +127,16 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
     scaler = GradScaler(enabled=(device=="cuda"))
 
     best_auc = 0
+    patience_counter = 0
+    early_stopping_patience = config.get("early_stopping_patience", 10)
+
     history = {"train_loss": [], "val_auc": [], "val_acc": []}
 
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
-        loss_fn.set_epoch(epoch)
 
-        train_losses = train_epoch(model, train_loader, optimizer, scheduler,
-                                  loss_fn, scaler, device, config["gradient_accumulation_steps"])
+        train_losses, skipped, grad_norm = train_epoch(model, train_loader, optimizer, scheduler,
+                                                          loss_fn, scaler, device, config["gradient_accumulation_steps"])
         val_metrics = evaluate(model, val_loader, device)
 
         history["train_loss"].append(train_losses["total"])
@@ -140,10 +145,14 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
 
         print(f"Epoch {epoch+1}/{config['num_epochs']}: "
               f"Loss={train_losses['total']:.4f}, AUC={val_metrics['auc']:.4f}, "
-              f"Acc={val_metrics['accuracy']:.4f}, Time={time.time()-epoch_start:.1f}s")
+              f"Acc={val_metrics['accuracy']:.4f}, GradNorm={grad_norm:.4f}, Time={time.time()-epoch_start:.1f}s")
+
+        if skipped > 0:
+            print(f"  Skipped {skipped} batches with non-finite loss")
 
         if val_metrics["auc"] > best_auc:
             best_auc = val_metrics["auc"]
+            patience_counter = 0
             checkpoint_path = checkpoint_dir / "best.pth"
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
@@ -152,5 +161,11 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
                 "epoch": epoch,
                 "auc": best_auc,
             }, checkpoint_path)
+        else:
+            patience_counter += 1
+
+        if patience_counter >= early_stopping_patience:
+            print(f"Early stopping triggered after {epoch+1} epochs")
+            break
 
     return history, best_auc

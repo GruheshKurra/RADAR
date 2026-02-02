@@ -7,22 +7,19 @@ data_dir: './data'
 source_domain: 'stylegan'
 target_domain: 'cifake'
 preprocess_dir: './preprocessed'
-cache_in_ram: false
 
 img_size: 224
 patch_size: 16
 embed_dim: 384
 evidence_dim: 64
-reasoning_iterations: 2
+reasoning_iterations: 3
 reasoning_heads: 4
 fft_size: 112
-freq_cutoff_divisor: 8
 dropout: 0.1
-use_dct: true
-prediction_feedback: true
 
 batch_size: 128
 num_epochs: 50
+early_stopping_patience: 10
 learning_rate: 0.001
 weight_decay: 0.05
 warmup_ratio: 0.1
@@ -38,4 +35,3 @@ lambda_orthogonal: 0.1
 lambda_deep_supervision: 0.05
 label_smoothing: 0.1
 orthogonality_margin: 0.1
-orthogonality_warmup_epochs: 5

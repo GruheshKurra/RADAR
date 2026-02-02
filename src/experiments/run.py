@@ -56,27 +56,43 @@ def main():
         train_images, train_labels, domain_ids,
         get_train_transforms(config["img_size"]),
         config.get("preprocess_dir"),
-        config.get("cache_in_ram", False)
+        validate_cache=True
     )
 
     val_dataset = DeepfakeDataset(
         val_images, val_labels, [0] * len(val_images),
         get_val_transforms(config["img_size"]),
         config.get("preprocess_dir"),
-        config.get("cache_in_ram", False)
+        validate_cache=False
+    )
+
+    test_dataset = DeepfakeDataset(
+        test_images, test_labels, [0] * len(test_images),
+        get_val_transforms(config["img_size"]),
+        config.get("preprocess_dir"),
+        validate_cache=False
     )
 
     train_loader = DataLoader(train_dataset, batch_size=config["batch_size"],
                              shuffle=True, num_workers=config["num_workers"],
                              pin_memory=True, drop_last=True,
                              persistent_workers=config["num_workers"] > 0,
-                             prefetch_factor=4 if config["num_workers"] > 0 else None)
+                             prefetch_factor=4 if config["num_workers"] > 0 else None,
+                             worker_init_fn=lambda x: np.random.seed(config["seed"] + x))
 
     val_loader = DataLoader(val_dataset, batch_size=config["batch_size"],
-                           shuffle=False, num_workers=config["num_workers"],
-                           pin_memory=True,
-                           persistent_workers=config["num_workers"] > 0,
-                           prefetch_factor=4 if config["num_workers"] > 0 else None)
+                            shuffle=False, num_workers=config["num_workers"],
+                            pin_memory=True,
+                            persistent_workers=config["num_workers"] > 0,
+                            prefetch_factor=4 if config["num_workers"] > 0 else None,
+                            worker_init_fn=lambda x: np.random.seed(config["seed"] + x))
+
+    test_loader = DataLoader(test_dataset, batch_size=config["batch_size"],
+                             shuffle=False, num_workers=config["num_workers"],
+                             pin_memory=True,
+                             persistent_workers=config["num_workers"] > 0,
+                             prefetch_factor=4 if config["num_workers"] > 0 else None,
+                             worker_init_fn=lambda x: np.random.seed(config["seed"] + x))
 
     model_config = RADARConfig(**{k: v for k, v in config.items() if k in RADARConfig.__annotations__})
     model = RADAR(model_config).to(device)
@@ -85,13 +101,33 @@ def main():
     print(f"Device: {device}")
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
 
     history, best_auc = train_model(model, train_loader, val_loader, config, device, output_dir)
 
-    with open(output_dir / "metrics.json", 'w') as f:
-        json.dump(history, f, indent=2)
+    checkpoint_path = output_dir / "best.pth"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
 
-    print(f"\nTraining complete. Best AUC: {best_auc:.4f}")
+    test_metrics = evaluate(model, test_loader, device)
+    print(f"\nTest Set Results:")
+    print(f"AUC: {test_metrics['auc']:.4f}")
+    print(f"Accuracy: {test_metrics['accuracy']:.4f}")
+
+    results = {
+        "history": history,
+        "best_val_auc": best_auc,
+        "test_metrics": {
+            "auc": float(test_metrics["auc"]),
+            "accuracy": float(test_metrics["accuracy"]),
+        }
+    }
+
+    with open(output_dir / "metrics.json", 'w') as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\nTraining complete. Best Val AUC: {best_auc:.4f}, Test AUC: {test_metrics['auc']:.4f}")
     print(f"Results saved to {output_dir}")
 
 

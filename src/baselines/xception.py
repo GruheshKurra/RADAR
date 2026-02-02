@@ -1,17 +1,13 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
+import timm
 from typing import Dict, Optional
 
 
-class ResNetBaseline(nn.Module):
+class XceptionBaseline(nn.Module):
     def __init__(self, pretrained: bool = True):
         super().__init__()
-        if pretrained:
-            self.backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-        else:
-            self.backbone = models.resnet50(weights=None)
-        self.backbone.fc = nn.Linear(self.backbone.fc.in_features, 1)
+        self.backbone = timm.create_model("xception", pretrained=pretrained, num_classes=1)
 
     def forward(self, x: torch.Tensor, freq_cached: Optional[torch.Tensor] = None,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:

@@ -13,23 +13,13 @@ class LossConfig:
     lambda_deep_supervision: float = 0.05
     label_smoothing: float = 0.1
     orthogonality_margin: float = 0.1
-    orthogonality_warmup_epochs: int = 5
 
 
 class RADARLoss(nn.Module):
     def __init__(self, config: LossConfig):
         super().__init__()
         self.config = config
-        self.epoch = 0
         self.bce = nn.BCEWithLogitsLoss(reduction='mean')
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-
-    def _get_orthogonality_weight(self) -> float:
-        if self.epoch >= self.config.orthogonality_warmup_epochs:
-            return 1.0
-        return self.epoch / self.config.orthogonality_warmup_epochs
 
     def forward(self, outputs: Dict[str, torch.Tensor], labels: torch.Tensor) -> Dict[str, torch.Tensor]:
         labels_float = labels.float().unsqueeze(1)
@@ -52,21 +42,19 @@ class RADARLoss(nn.Module):
         loss_orthogonal = F.relu(cosine_sim - self.config.orthogonality_margin).mean()
 
         loss_deep_supervision = torch.tensor(0.0, device=labels.device)
-        if outputs["iteration_logits"].shape[1] > 1:
+        if outputs["iteration_logits"].shape[1] >= 1:
             num_iters = outputs["iteration_logits"].shape[1]
             weights = torch.linspace(1.0 / num_iters, 1.0, num_iters, device=labels.device)
             weights = weights / weights.sum()
 
-            labels_expanded = labels_smoothed.expand(-1, num_iters)
+            labels_expanded = labels_smoothed.expand(-1, num_iters).to(device=labels.device)
             iter_losses = F.binary_cross_entropy_with_logits(outputs["iteration_logits"], labels_expanded, reduction='none')
             loss_deep_supervision = (iter_losses.mean(dim=0) * weights).sum()
-
-        orth_weight = self._get_orthogonality_weight()
 
         total_loss = (
             self.config.lambda_main * loss_main +
             self.config.lambda_branch * loss_branch +
-            self.config.lambda_orthogonal * orth_weight * loss_orthogonal +
+            self.config.lambda_orthogonal * loss_orthogonal +
             self.config.lambda_deep_supervision * loss_deep_supervision
         )
 
@@ -76,5 +64,4 @@ class RADARLoss(nn.Module):
             "branch": loss_branch,
             "orthogonal": loss_orthogonal,
             "deep_supervision": loss_deep_supervision,
-            "orthogonal_weight": torch.tensor(orth_weight),
         }
