@@ -39,7 +39,7 @@ class RADARLoss(nn.Module):
         badm_ev = F.normalize(outputs["badm_evidence"], dim=1)
         aadm_ev = F.normalize(outputs["aadm_evidence"], dim=1)
         cosine_sim = (badm_ev * aadm_ev).sum(dim=1)
-        loss_orthogonal = F.relu(cosine_sim - self.config.orthogonality_margin).mean()
+        loss_orthogonal = F.relu(torch.abs(cosine_sim) - self.config.orthogonality_margin).mean()
 
         loss_deep_supervision = torch.tensor(0.0, device=labels.device)
         if outputs["iteration_logits"].shape[1] >= 1:

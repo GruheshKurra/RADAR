@@ -41,7 +41,9 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
         labels = labels.to(device, non_blocking=True)
 
         with autocast(device_type=device, enabled=(device=="cuda")):
-            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached)
+            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached,
+                           use_badm=config.get("use_badm", True),
+                           use_aadm=config.get("use_aadm", True))
             losses = loss_fn(outputs, labels)
             loss = losses["total"] / gradient_accumulation_steps
 
@@ -75,11 +77,11 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
 
 
 @torch.inference_mode()
-def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict:
-    model.eval()
-
+def evaluate(model: nn.Module, loader: DataLoader, device: str,
+            use_badm: bool = True, use_aadm: bool = True) -> Dict:
     all_probs = []
     all_labels = []
+    all_convergence_deltas = []
 
     for batch_data in loader:
         if len(batch_data) == 4:
@@ -93,14 +95,17 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict:
         images = images.to(device)
 
         with autocast(device_type=device, enabled=(device=="cuda")):
-            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached)
+            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached,
+                           use_badm=use_badm, use_aadm=use_aadm)
 
         all_probs.append(outputs["prob"].cpu())
         all_labels.append(labels)
+        all_convergence_deltas.append(outputs["convergence_delta"].cpu())
 
     all_probs = torch.cat(all_probs, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
     all_preds = (all_probs > 0.5).astype(int)
+    all_convergence_deltas = torch.cat(all_convergence_deltas, dim=0).mean().item()
 
     from sklearn.metrics import accuracy_score, roc_auc_score
 
@@ -109,6 +114,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict:
         "auc": roc_auc_score(all_labels, all_probs),
         "probs": all_probs,
         "labels": all_labels,
+        "convergence_delta": all_convergence_deltas,
     }
 
 
@@ -130,22 +136,26 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
     patience_counter = 0
     early_stopping_patience = config.get("early_stopping_patience", 10)
 
-    history = {"train_loss": [], "val_auc": [], "val_acc": []}
+    history = {"train_loss": [], "val_auc": [], "val_acc": [], "val_convergence_delta": []}
 
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
 
         train_losses, skipped, grad_norm = train_epoch(model, train_loader, optimizer, scheduler,
                                                           loss_fn, scaler, device, config["gradient_accumulation_steps"])
-        val_metrics = evaluate(model, val_loader, device)
+        val_metrics = evaluate(model, val_loader, device,
+                              use_badm=config.get("use_badm", True),
+                              use_aadm=config.get("use_aadm", True))
 
         history["train_loss"].append(train_losses["total"])
         history["val_auc"].append(val_metrics["auc"])
         history["val_acc"].append(val_metrics["accuracy"])
+        history["val_convergence_delta"].append(val_metrics["convergence_delta"])
 
         print(f"Epoch {epoch+1}/{config['num_epochs']}: "
               f"Loss={train_losses['total']:.4f}, AUC={val_metrics['auc']:.4f}, "
-              f"Acc={val_metrics['accuracy']:.4f}, GradNorm={grad_norm:.4f}, Time={time.time()-epoch_start:.1f}s")
+              f"Acc={val_metrics['accuracy']:.4f}, ConvDelta={val_metrics['convergence_delta']:.4f}, "
+              f"GradNorm={grad_norm:.4f}, Time={time.time()-epoch_start:.1f}s")
 
         if skipped > 0:
             print(f"  Skipped {skipped} batches with non-finite loss")

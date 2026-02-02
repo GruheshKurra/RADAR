@@ -28,8 +28,8 @@ def aggregate_multi_seed_results(experiment_dirs: List[Path]) -> Dict:
     for key in metrics_keys:
         values = []
         for result in all_results:
-            if key in result["metrics"]:
-                final_value = result["metrics"][key][-1]
+            if "history" in result["metrics"] and key in result["metrics"]["history"]:
+                final_value = result["metrics"]["history"][key][-1]
                 values.append(final_value)
 
         if values:

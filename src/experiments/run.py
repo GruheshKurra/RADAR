@@ -110,7 +110,9 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    test_metrics = evaluate(model, test_loader, device)
+    test_metrics = evaluate(model, test_loader, device,
+                           use_badm=config.get("use_badm", True),
+                           use_aadm=config.get("use_aadm", True))
     print(f"\nTest Set Results:")
     print(f"AUC: {test_metrics['auc']:.4f}")
     print(f"Accuracy: {test_metrics['accuracy']:.4f}")

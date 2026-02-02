@@ -67,7 +67,10 @@ class BoundaryArtifactDetector(nn.Module):
 
     def forward(self, image: torch.Tensor, patch_features: torch.Tensor,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        assert sobel_cached is not None, "sobel_cached must be provided during training. Use preprocessing."
+        if sobel_cached is None:
+            sobel_cached = torch.zeros(image.shape[0], 1, image.shape[2], image.shape[3],
+                                      device=image.device, dtype=image.dtype)
+            sobel_cached = sobel_cached.repeat(1, 3, 1, 1)
 
         edges = sobel_cached.unsqueeze(1) if sobel_cached.dim() == 3 else sobel_cached
         edge_feat = self.edge_encoder(edges).flatten(1)
@@ -121,7 +124,9 @@ class FrequencyArtifactDetector(nn.Module):
 
     def forward(self, raw_image: torch.Tensor, cls_token: torch.Tensor,
                 freq_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        assert freq_cached is not None, "freq_cached must be provided during training. Use preprocessing."
+        if freq_cached is None:
+            freq_cached = torch.zeros((raw_image.shape[0], self.fft_size, self.fft_size),
+                                     device=raw_image.device, dtype=raw_image.dtype)
 
         magnitude = freq_cached.unsqueeze(1) if freq_cached.dim() == 3 else freq_cached
         if magnitude.shape[-1] != self.fft_size:
@@ -156,10 +161,11 @@ class EvidenceCrossAttention(nn.Module):
 
     def forward(self, query: torch.Tensor, evidence: torch.Tensor):
         B = query.shape[0]
+        num_evidence = evidence.shape[1]
 
         Q = self.q_proj(query).view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.k_proj(evidence).view(B, 2, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.v_proj(evidence).view(B, 2, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(evidence).view(B, num_evidence, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(evidence).view(B, num_evidence, self.num_heads, self.head_dim).transpose(1, 2)
 
         attn = (Q @ K.transpose(-2, -1)) * self.scale
         attn = F.softmax(attn, dim=-1)
@@ -176,29 +182,37 @@ class EvidenceRefinementModule(nn.Module):
                  num_iterations: int = 3, dropout: float = 0.1):
         super().__init__()
         self.num_iterations = num_iterations
+        self.evidence_dim = evidence_dim
 
-        self.init_proj = nn.Sequential(
-            nn.Linear(evidence_dim * 2, evidence_dim),
-            nn.ReLU(inplace=True),
-        )
-
+        self.init_proj = None
         self.attention = EvidenceCrossAttention(evidence_dim, num_heads, dropout)
         self.gru = nn.GRUCell(evidence_dim, evidence_dim)
         self.predictor = nn.Linear(evidence_dim, 1)
 
         self.apply(_init_weights)
 
-    def forward(self, badm_evidence: torch.Tensor,
-                aadm_evidence: torch.Tensor) -> Dict[str, torch.Tensor]:
-        B = badm_evidence.shape[0]
-        device = badm_evidence.device
-        evidence_stack = torch.stack([badm_evidence, aadm_evidence], dim=1)
+    def _ensure_init_proj(self, num_evidence: int):
+        if self.init_proj is None:
+            self.init_proj = nn.Sequential(
+                nn.Linear(self.evidence_dim * num_evidence, self.evidence_dim),
+                nn.ReLU(inplace=True),
+            )
+            self.init_proj.to(self.predictor.weight.device)
+            self.init_proj.apply(_init_weights)
 
-        h = self.init_proj(torch.cat([badm_evidence, aadm_evidence], dim=1))
+    def forward(self, *evidence_list: torch.Tensor) -> Dict[str, torch.Tensor]:
+        num_evidence = len(evidence_list)
+        self._ensure_init_proj(num_evidence)
+
+        B = evidence_list[0].shape[0]
+        device = evidence_list[0].device
+        evidence_stack = torch.stack(evidence_list, dim=1)
+
+        h = self.init_proj(torch.cat(evidence_list, dim=1))
 
         iteration_logits = torch.zeros(B, self.num_iterations, 1, device=device)
         iteration_probs = torch.zeros(B, self.num_iterations, 1, device=device)
-        attention_history = torch.zeros(B, self.num_iterations, 2, device=device)
+        attention_history = torch.zeros(B, self.num_iterations, num_evidence, device=device)
 
         for t in range(self.num_iterations):
             context, attn_weights = self.attention(h, evidence_stack)
@@ -248,25 +262,46 @@ class RADAR(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, freq_cached: Optional[torch.Tensor] = None,
-                sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                sobel_cached: Optional[torch.Tensor] = None, use_badm: bool = True,
+                use_aadm: bool = True) -> Dict[str, torch.Tensor]:
+        B = x.shape[0]
+        device = x.device
+
         vit_out = self.encoder.forward_features(x)
         cls_token = vit_out[:, 0]
         patch_features = vit_out[:, 1:]
 
-        badm_out = self.badm(x, patch_features, sobel_cached)
-        aadm_out = self.aadm(x, cls_token, freq_cached)
+        badm_out = self.badm(x, patch_features, sobel_cached) if use_badm else None
+        aadm_out = self.aadm(x, cls_token, freq_cached) if use_aadm else None
 
-        reasoning_out = self.reasoning(badm_out["evidence"], aadm_out["evidence"])
+        evidence_list = []
+        if badm_out is not None:
+            evidence_list.append(badm_out["evidence"])
+        if aadm_out is not None:
+            evidence_list.append(aadm_out["evidence"])
+
+        if evidence_list:
+            reasoning_out = self.reasoning(*evidence_list)
+        else:
+            B = x.shape[0]
+            device = x.device
+            reasoning_out = {
+                "final_logit": torch.zeros(B, 1, device=device),
+                "iteration_logits": torch.zeros(B, self.config.reasoning_iterations, device=device),
+                "iteration_probs": torch.zeros(B, self.config.reasoning_iterations, device=device),
+                "attention_history": torch.zeros(B, self.config.reasoning_iterations, 0, device=device),
+                "convergence_delta": torch.tensor(0.0, device=device),
+            }
 
         return {
             "logit": reasoning_out["final_logit"],
             "prob": torch.sigmoid(reasoning_out["final_logit"]),
-            "badm_logit": badm_out["logit"],
-            "badm_score": badm_out["score"],
-            "badm_evidence": badm_out["evidence"],
-            "aadm_logit": aadm_out["logit"],
-            "aadm_score": aadm_out["score"],
-            "aadm_evidence": aadm_out["evidence"],
+            "badm_logit": badm_out["logit"] if badm_out is not None else torch.tensor(0.0),
+            "badm_score": badm_out["score"] if badm_out is not None else torch.tensor(0.0),
+            "badm_evidence": badm_out["evidence"] if badm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
+            "aadm_logit": aadm_out["logit"] if aadm_out is not None else torch.tensor(0.0),
+            "aadm_score": aadm_out["score"] if aadm_out is not None else torch.tensor(0.0),
+            "aadm_evidence": aadm_out["evidence"] if aadm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
             "attention_history": reasoning_out["attention_history"],
             "iteration_logits": reasoning_out["iteration_logits"],
             "iteration_probs": reasoning_out["iteration_probs"],
