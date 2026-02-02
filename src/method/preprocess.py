@@ -1,0 +1,78 @@
+import torch
+import cv2
+import numpy as np
+from pathlib import Path
+from typing import Optional
+import hashlib
+
+
+class FrequencyExtractor:
+    def __init__(self, use_dct: bool = True):
+        self.use_dct = use_dct
+        if use_dct:
+            import torch_dct
+            self.torch_dct = torch_dct
+
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image
+
+        gray_normalized = gray.astype(np.float32) / 255.0
+
+        if self.use_dct:
+            gray_tensor = torch.from_numpy(gray_normalized).unsqueeze(0).unsqueeze(0)
+            dct = self.torch_dct.dct_2d(gray_tensor)
+            freq_magnitude = torch.abs(dct).squeeze().numpy()
+        else:
+            fft = np.fft.fft2(gray_normalized)
+            fft_shifted = np.fft.fftshift(fft)
+            freq_magnitude = np.abs(fft_shifted)
+
+        freq_magnitude = np.log1p(freq_magnitude)
+        freq_magnitude = (freq_magnitude - freq_magnitude.min()) / (freq_magnitude.max() - freq_magnitude.min() + 1e-8)
+
+        return freq_magnitude.astype(np.float32)
+
+
+class EdgeExtractor:
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image
+
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        sobel_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+
+        sobel_normalized = (sobel_magnitude / sobel_magnitude.max() * 255).astype(np.uint8)
+
+        return sobel_normalized
+
+
+def preprocess_image(img_path: Path, output_dir: Path,
+                     freq_extractor: FrequencyExtractor,
+                     edge_extractor: EdgeExtractor) -> bool:
+    try:
+        image = cv2.imread(str(img_path))
+        if image is None:
+            return False
+
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        freq_features = freq_extractor(image_rgb)
+        edge_features = edge_extractor(image_rgb)
+
+        img_hash = hashlib.md5(str(img_path).encode()).hexdigest()[:16]
+
+        freq_path = output_dir / f"{img_hash}_freq.npy"
+        edge_path = output_dir / f"{img_hash}_sobel.npy"
+
+        np.save(str(freq_path), freq_features)
+        np.save(str(edge_path), edge_features)
+
+        return True
+    except Exception:
+        return False
