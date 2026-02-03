@@ -44,7 +44,9 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
             outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached,
                            use_badm=config.get("use_badm", True),
                            use_aadm=config.get("use_aadm", True))
-            losses = loss_fn(outputs, labels)
+            losses = loss_fn(outputs, labels,
+                           use_badm=config.get("use_badm", True),
+                           use_aadm=config.get("use_aadm", True))
             loss = losses["total"] / gradient_accumulation_steps
 
         if not torch.isfinite(loss):

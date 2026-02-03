@@ -29,12 +29,65 @@ def _init_weights(m):
             nn.init.constant_(m.bias, 0)
 
 
+def compute_frequency_spectrum(image: torch.Tensor, target_size: int = 112) -> torch.Tensor:
+    """
+    Compute frequency spectrum using FFT with high-pass filter.
+
+    This is the canonical frequency extraction for AADM. The same logic is used
+    for on-the-fly computation and should match preprocessing when applicable.
+
+    Args:
+        image: RGB image tensor (B, 3, H, W)
+        target_size: Size to resize for FFT computation
+
+    Returns:
+        Normalized frequency magnitude (B, H, W)
+    """
+    # Convert to grayscale
+    gray = 0.299 * image[:, 0] + 0.587 * image[:, 1] + 0.114 * image[:, 2]
+
+    # Resize if needed
+    if gray.shape[-1] != target_size:
+        gray = F.interpolate(gray.unsqueeze(1), size=(target_size, target_size),
+                            mode='bilinear', align_corners=False).squeeze(1)
+
+    # FFT and shift to center
+    fft = torch.fft.fft2(gray)
+    fft_shifted = torch.fft.fftshift(fft)
+    magnitude = torch.abs(fft_shifted)
+
+    # Apply high-pass filter (emphasize high frequencies)
+    H, W = magnitude.shape[-2:]
+    center_y, center_x = H // 2, W // 2
+    y, x = torch.meshgrid(torch.arange(H, device=gray.device),
+                         torch.arange(W, device=gray.device), indexing='ij')
+    dist = torch.sqrt((x - center_x)**2 + (y - center_y)**2)
+    cutoff = min(H, W) / 8
+    high_pass = torch.sigmoid((dist - cutoff) / 10)
+
+    magnitude = magnitude * high_pass.unsqueeze(0)
+
+    # Log normalization
+    freq_magnitude = torch.log1p(magnitude)
+    freq_magnitude = (freq_magnitude - freq_magnitude.min()) / (freq_magnitude.max() - freq_magnitude.min() + 1e-8)
+
+    return freq_magnitude
+
+
 class BoundaryArtifactDetector(nn.Module):
+    """
+    Boundary Artifact Detection Module (BADM).
+
+    Processes Sobel edge maps (1-channel grayscale) through a CNN encoder.
+    Note: Sobel is computed as single-channel gradient magnitude, then used directly
+    without replication to RGB channels. The edge_encoder is designed for 1-channel input.
+    """
     def __init__(self, embed_dim: int = 384, evidence_dim: int = 64):
         super().__init__()
 
+        # Edge encoder: takes 1-channel Sobel edge map
         self.edge_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, 7, stride=4, padding=3),
+            nn.Conv2d(1, 32, 7, stride=4, padding=3),  # 1-channel input (Sobel magnitude)
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, 5, stride=2, padding=2),
@@ -68,9 +121,11 @@ class BoundaryArtifactDetector(nn.Module):
     def forward(self, image: torch.Tensor, patch_features: torch.Tensor,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if sobel_cached is None:
+            # Compute grayscale using luminance formula
             gray = 0.299 * image[:, 0] + 0.587 * image[:, 1] + 0.114 * image[:, 2]
             gray = gray.unsqueeze(1)
 
+            # Compute Sobel edge detection
             sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
                                   dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
             sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
@@ -80,8 +135,9 @@ class BoundaryArtifactDetector(nn.Module):
             grad_y = F.conv2d(gray, sobel_y, padding=1)
             sobel_cached = torch.sqrt(grad_x**2 + grad_y**2)
             sobel_cached = sobel_cached / (sobel_cached.max() + 1e-8)
-            sobel_cached = sobel_cached.repeat(1, 3, 1, 1)
+            # Keep as 1-channel (B, 1, H, W) - no replication to 3 channels
 
+        # Ensure sobel_cached is 4D (B, 1, H, W)
         edges = sobel_cached.unsqueeze(1) if sobel_cached.dim() == 3 else sobel_cached
         edge_feat = self.edge_encoder(edges).flatten(1)
 
@@ -134,29 +190,11 @@ class FrequencyArtifactDetector(nn.Module):
 
     def forward(self, raw_image: torch.Tensor, cls_token: torch.Tensor,
                 freq_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        # Compute frequency spectrum if not cached
         if freq_cached is None:
-            gray = 0.299 * raw_image[:, 0] + 0.587 * raw_image[:, 1] + 0.114 * raw_image[:, 2]
+            freq_cached = compute_frequency_spectrum(raw_image, target_size=self.fft_size)
 
-            if gray.shape[-1] != self.fft_size:
-                gray = F.interpolate(gray.unsqueeze(1), size=(self.fft_size, self.fft_size),
-                                    mode='bilinear', align_corners=False).squeeze(1)
-
-            fft = torch.fft.fft2(gray)
-            fft_shifted = torch.fft.fftshift(fft)
-            magnitude = torch.abs(fft_shifted)
-
-            H, W = magnitude.shape[-2:]
-            center_y, center_x = H // 2, W // 2
-            y, x = torch.meshgrid(torch.arange(H, device=gray.device),
-                                 torch.arange(W, device=gray.device), indexing='ij')
-            dist = torch.sqrt((x - center_x)**2 + (y - center_y)**2)
-            cutoff = min(H, W) / 8
-            high_pass = torch.sigmoid((dist - cutoff) / 10)
-
-            magnitude = magnitude * high_pass.unsqueeze(0)
-            freq_cached = torch.log1p(magnitude)
-            freq_cached = (freq_cached - freq_cached.min()) / (freq_cached.max() - freq_cached.min() + 1e-8)
-
+        # Ensure correct shape (B, 1, H, W)
         magnitude = freq_cached.unsqueeze(1) if freq_cached.dim() == 3 else freq_cached
         if magnitude.shape[-1] != self.fft_size:
             magnitude = F.interpolate(magnitude, size=(self.fft_size, self.fft_size),
@@ -207,41 +245,50 @@ class EvidenceCrossAttention(nn.Module):
 
 
 class EvidenceRefinementModule(nn.Module):
+    """
+    Evidence Refinement Module (ERM).
+
+    Uses iterative cross-attention and GRU to refine evidence from BADM and AADM.
+    Fixed to always expect 2 evidence sources (BADM + AADM) for architectural consistency.
+    """
     def __init__(self, evidence_dim: int = 64, num_heads: int = 4,
                  num_iterations: int = 3, dropout: float = 0.1):
         super().__init__()
         self.num_iterations = num_iterations
         self.evidence_dim = evidence_dim
 
-        self.init_proj = None
+        # Fixed initialization: always assume 2 evidence sources (BADM + AADM)
+        self.init_proj = nn.Sequential(
+            nn.Linear(self.evidence_dim * 2, self.evidence_dim),
+            nn.ReLU(inplace=True),
+        )
+
         self.attention = EvidenceCrossAttention(evidence_dim, num_heads, dropout)
         self.gru = nn.GRUCell(evidence_dim, evidence_dim)
         self.predictor = nn.Linear(evidence_dim, 1)
 
         self.apply(_init_weights)
 
-    def _ensure_init_proj(self, num_evidence: int):
-        if self.init_proj is None:
-            self.init_proj = nn.Sequential(
-                nn.Linear(self.evidence_dim * num_evidence, self.evidence_dim),
-                nn.ReLU(inplace=True),
-            )
-            self.init_proj.to(self.predictor.weight.device)
-            self.init_proj.apply(_init_weights)
-
     def forward(self, *evidence_list: torch.Tensor) -> Dict[str, torch.Tensor]:
-        num_evidence = len(evidence_list)
-        self._ensure_init_proj(num_evidence)
+        """
+        Forward pass with fixed 2 evidence sources.
+
+        Args:
+            evidence_list: Tuple of evidence tensors (BADM, AADM)
+        """
+        if len(evidence_list) != 2:
+            raise ValueError(f"ERM expects exactly 2 evidence sources, got {len(evidence_list)}")
 
         B = evidence_list[0].shape[0]
         device = evidence_list[0].device
         evidence_stack = torch.stack(evidence_list, dim=1)
 
+        # Initialize hidden state from concatenated evidence
         h = self.init_proj(torch.cat(evidence_list, dim=1))
 
         iteration_logits = torch.zeros(B, self.num_iterations, 1, device=device)
         iteration_probs = torch.zeros(B, self.num_iterations, 1, device=device)
-        attention_history = torch.zeros(B, self.num_iterations, num_evidence, device=device)
+        attention_history = torch.zeros(B, self.num_iterations, 2, device=device)
 
         for t in range(self.num_iterations):
             context, attn_weights = self.attention(h, evidence_stack)
@@ -311,30 +358,23 @@ class RADAR(nn.Module):
         badm_out = self.badm(x, patch_features, sobel_cached) if use_badm else None
         aadm_out = self.aadm(x, cls_token, freq_cached) if use_aadm else None
 
-        evidence_list = []
-        if badm_out is not None:
-            evidence_list.append(badm_out["evidence"])
-        if aadm_out is not None:
-            evidence_list.append(aadm_out["evidence"])
-
-        if evidence_list:
+        # Reasoning module requires BOTH evidence sources (BADM + AADM)
+        # For ablations, we skip reasoning and use zero outputs
+        if use_badm and use_aadm and badm_out is not None and aadm_out is not None:
+            # Full model: use reasoning module with both evidence sources
+            evidence_list = [badm_out["evidence"], aadm_out["evidence"]]
             reasoning_out = self.reasoning(*evidence_list)
 
-            if len(evidence_list) == 2:
-                external_input = torch.cat(evidence_list, dim=1)
-                external_logit = self.external_classifier(external_input)
-                final_logit = (reasoning_out["final_logit"] + external_logit) / 2
-            else:
-                external_logit = torch.zeros(B, 1, device=device)
-                final_logit = reasoning_out["final_logit"]
+            external_input = torch.cat(evidence_list, dim=1)
+            external_logit = self.external_classifier(external_input)
+            final_logit = (reasoning_out["final_logit"] + external_logit) / 2
         else:
-            B = x.shape[0]
-            device = x.device
+            # Ablation mode: return zero outputs
             reasoning_out = {
                 "final_logit": torch.zeros(B, 1, device=device),
                 "iteration_logits": torch.zeros(B, self.config.reasoning_iterations, device=device),
                 "iteration_probs": torch.zeros(B, self.config.reasoning_iterations, device=device),
-                "attention_history": torch.zeros(B, self.config.reasoning_iterations, 0, device=device),
+                "attention_history": torch.zeros(B, self.config.reasoning_iterations, 2, device=device),
                 "convergence_delta": torch.tensor(0.0, device=device),
             }
             external_logit = torch.zeros(B, 1, device=device)
