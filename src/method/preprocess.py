@@ -7,7 +7,13 @@ import hashlib
 
 
 class FrequencyExtractor:
-    def __init__(self, use_dct: bool = True):
+
+    Note: This preprocessing version supports both DCT and FFT for flexibility.
+    For inference, FrequencyArtifactDetector in model.py uses the canonical FFT
+    implementation (see compute_frequency_spectrum). The preprocessing cache is
+    optional and only provides a speedup; models work correctly without it.
+
+    def __init__(self, use_dct: bool = False):
         self.use_dct = use_dct
         if use_dct:
             import torch_dct

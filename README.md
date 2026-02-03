@@ -10,6 +10,21 @@ A novel deepfake detection framework that combines boundary and frequency artifa
 
 ---
 
+## 📑 Table of Contents
+
+1. [Quick Start (5 Minutes)](#-quick-start-5-minutes)
+2. [Installation & Setup](#-installation--setup)
+3. [Architecture Overview](#-architecture-overview)
+4. [Training & Evaluation](#-training--evaluation)
+5. [Ablation Studies](#-ablation-studies)
+6. [Results](#-results)
+7. [Implementation Details](#-implementation-details)
+8. [Citation](#-citation)
+
+**📖 For paper-level technical details**, see [Architecture Overview](#-architecture-overview) and [Implementation Details](#-implementation-details).
+
+---
+
 ## 🚀 Quick Start (5 Minutes)
 
 ```bash
@@ -46,8 +61,8 @@ pip install datasets scikit-learn matplotlib seaborn
 
 **Artifact Detection (BADM & AADM):**
 - Both modules now **compute features on-the-fly** if cache is missing
-- BADM: Sobel edge detection computed in-module (no silent zeros)
-- AADM: FFT + high-pass filter computed in-module (no silent zeros)
+- BADM: Sobel edge detection (1-channel grayscale) computed in-module
+- AADM: FFT + high-pass filter computed in-module
 - Preprocessing cache still recommended for 4x speedup
 
 **Model Architecture:**
@@ -64,6 +79,7 @@ pip install datasets scikit-learn matplotlib seaborn
 - Domain IDs removed (unused feature)
 - Clean 2-tuple or 3-tuple returns: `(image, label[, extras])`
 - Simplified dataloader integration
+- Frame-level datasets (FF++) are class-imbalanced (more fake frames than real); stratified splits are used to mitigate bias
 
 ### Dataset Setup
 
@@ -268,30 +284,36 @@ Synthetic images exhibit characteristic artifacts at semantic boundaries:
 **Architecture:**
 
 ```
-Input Image
+Input Image (RGB)
     │
     ▼
 ┌─────────────────────────────────────┐
-│ Sobel Edge Detection                │
+│ Sobel Edge Detection (Grayscale)   │
 │                                     │
-│ Sobel_x = [[-1, 0, 1],             │
-│            [-2, 0, 2],             │
-│            [-1, 0, 1]]             │
+│ 1. Convert to grayscale             │
+│    gray = 0.299*R + 0.587*G + 0.114*B │
 │                                     │
-│ Sobel_y = [[-1,-2,-1],             │
-│            [ 0, 0, 0],             │
-│            [ 1, 2, 1]]             │
+│ 2. Apply Sobel operators            │
+│    Sobel_x = [[-1, 0, 1],          │
+│               [-2, 0, 2],          │
+│               [-1, 0, 1]]          │
 │                                     │
-│ Gradient magnitude = √(Gx² + Gy²)  │
+│    Sobel_y = [[-1,-2,-1],          │
+│               [ 0, 0, 0],          │
+│               [ 1, 2, 1]]          │
+│                                     │
+│ 3. Gradient magnitude (1-channel)   │
+│    magnitude = √(Gx² + Gy²)        │
+│    Output: (B, 1, H, W)            │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
 │ Edge Encoder (CNN)                  │
 │                                     │
-│ Conv(1→32, 3×3, s=2) → BN → GELU   │
-│ Conv(32→64, 3×3, s=2) → BN → GELU  │
-│ Conv(64→128, 3×3, s=2) → BN → GELU │
+│ Conv(1→32, 7×7, s=4) → BN → ReLU   │
+│ Conv(32→64, 5×5, s=2) → BN → ReLU  │
+│ Conv(64→128, 3×3, s=2) → BN → ReLU │
 │ AdaptiveAvgPool → [B, 128]         │
 └─────────────────────────────────────┘
     │
@@ -510,7 +532,7 @@ def forward(image):
         concat([badm_out["evidence"], aadm_out["evidence"]])
     )
 
-    # 6. Ensemble prediction
+    # 6. Ensemble prediction (equal weighting for stability and to avoid overfitting; learnable fusion is left as future work)
     main_logit = (reasoning_out["final_logit"] + external_logit) / 2
 
     return {
@@ -865,40 +887,41 @@ pip install pytest black flake8
 ### Dataset Download
 
 ```bash
-# Download and organize datasets
-python radar.py --download
+python src/data/download_datasets.py --datasets wilddeepfake --output_dir ./data
 
-# Or combined with training
-python radar.py --all
+python src/data/download_datasets.py --datasets check --output_dir ./data
 ```
 
 **Downloads automatically:**
-- StyleGAN dataset (140k real/fake faces) from Kaggle
-- CIFAKE dataset (Stable Diffusion images) from Kaggle
-- Organizes into `./data/{domain}/{real,fake}/` structure
+- WildDeepfake dataset (60k real/fake images) from HuggingFace
+- Organizes into `./data/wilddeepfake/{real,fake}/` structure
+- FaceForensics++ requires manual download (see Dataset Setup section above)
 
 ### Training
 
+**In-Domain Training (WildDeepfake):**
 ```bash
-# Full training pipeline
-python radar.py --train
-
-# Steps performed:
-# 1. In-domain training and evaluation
-# 2. Cross-domain generalization test
-# 3. Baseline comparisons
-# 4. Ablation studies
-# 5. Statistical significance tests
-# 6. Robustness evaluation
-# 7. Feature disentanglement analysis
-# 8. Attention analysis and visualization
-# 9. Performance benchmarking
+cd src/experiments
+python run.py --config configs/wilddeepfake.yaml --output ../../outputs
 ```
+
+**Cross-Domain Evaluation (WildDeepfake → FaceForensics++):**
+```bash
+cd src/experiments
+python run.py --config configs/cross_domain.yaml --output ../../outputs
+```
+
+**Experiment Configuration Reference:**
+
+| Config File         | Training Dataset | Testing Dataset | Purpose                     |
+| ------------------- | ---------------- | --------------- | --------------------------- |
+| `wilddeepfake.yaml` | WildDeepfake     | WildDeepfake    | In-domain evaluation        |
+| `cross_domain.yaml` | WildDeepfake     | FaceForensics++ | Cross-domain generalization |
 
 ### Configuration
 
 ```python
-# Modify config in radar.py or create custom config
+# Modify config files in src/experiments/configs/ or create custom config
 config = Config()
 config.img_size = 224
 config.batch_size = 128
@@ -1026,6 +1049,11 @@ num_epochs: 30
 - `weight_decay`: 0.05
 - `warmup_ratio`: 0.1
 - `early_stopping_patience`: 10
+
+**Reproducibility:**
+- Deterministic mode is enabled for reproducibility (torch.backends.cudnn.deterministic = True, benchmark = False)
+- This ensures consistent results across runs but reduces training speed by ~10-15%
+- For faster training, disable deterministic mode in src/experiments/run.py (not recommended for research)
 
 ---
 

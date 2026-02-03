@@ -16,12 +16,28 @@ class LossConfig:
 
 
 class RADARLoss(nn.Module):
+    """
+    RADAR composite loss function with proper ablation support.
+
+    Args:
+        config: Loss configuration with weights for each component
+    """
     def __init__(self, config: LossConfig):
         super().__init__()
         self.config = config
         self.bce = nn.BCEWithLogitsLoss(reduction='mean')
 
-    def forward(self, outputs: Dict[str, torch.Tensor], labels: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, outputs: Dict[str, torch.Tensor], labels: torch.Tensor,
+                use_badm: bool = True, use_aadm: bool = True) -> Dict[str, torch.Tensor]:
+        """
+        Compute losses with proper masking for ablation studies.
+
+        Args:
+            outputs: Model outputs dictionary
+            labels: Ground truth labels
+            use_badm: Whether BADM is enabled (for proper loss masking)
+            use_aadm: Whether AADM is enabled (for proper loss masking)
+        """
         labels_float = labels.float().unsqueeze(1)
 
         if self.config.label_smoothing > 0:
@@ -31,15 +47,17 @@ class RADARLoss(nn.Module):
 
         loss_main = self.bce(outputs["logit"], labels_smoothed)
 
+        # Branch loss: only apply if both branches are enabled
         loss_branch = torch.tensor(0.0, device=labels.device)
-        if outputs["badm_logit"].numel() > 0 and outputs["aadm_logit"].numel() > 0:
+        if use_badm and use_aadm:
             loss_branch = 0.5 * (
                 self.bce(outputs["badm_logit"], labels_smoothed) +
                 self.bce(outputs["aadm_logit"], labels_smoothed)
             )
 
+        # Orthogonality loss: only apply if both branches are enabled
         loss_orthogonal = torch.tensor(0.0, device=labels.device)
-        if outputs["badm_evidence"].numel() > 0 and outputs["aadm_evidence"].numel() > 0:
+        if use_badm and use_aadm:
             badm_norm = torch.norm(outputs["badm_evidence"], dim=1, keepdim=True)
             aadm_norm = torch.norm(outputs["aadm_evidence"], dim=1, keepdim=True)
 
