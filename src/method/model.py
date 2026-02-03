@@ -37,7 +37,8 @@ def compute_frequency_spectrum(image: torch.Tensor, target_size: int = 112) -> t
     for on-the-fly computation and should match preprocessing when applicable.
 
     Args:
-        image: RGB image tensor (B, 3, H, W)
+        image: RGB image tensor (B, 3, H, W) with ImageNet-style normalization
+            (per-channel mean subtraction and std division) as used in dataset preprocessing.
         target_size: Size to resize for FFT computation
 
     Returns:
@@ -67,9 +68,11 @@ def compute_frequency_spectrum(image: torch.Tensor, target_size: int = 112) -> t
 
     magnitude = magnitude * high_pass.unsqueeze(0)
 
-    # Log normalization
     freq_magnitude = torch.log1p(magnitude)
-    freq_magnitude = (freq_magnitude - freq_magnitude.min()) / (freq_magnitude.max() - freq_magnitude.min() + 1e-8)
+    min_vals = freq_magnitude.amin(dim=(1, 2), keepdim=True)
+    max_vals = freq_magnitude.amax(dim=(1, 2), keepdim=True)
+    denom = (max_vals - min_vals).clamp_min(1e-8)
+    freq_magnitude = (freq_magnitude - min_vals) / denom
 
     return freq_magnitude
 
