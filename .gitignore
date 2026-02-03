@@ -8,9 +8,6 @@ build/
 *.log
 *.pth
 *.ckpt
-data/
-preprocessed/
-outputs/
 *.npy
 .vscode/
 .idea/
