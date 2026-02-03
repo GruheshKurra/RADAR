@@ -31,15 +31,23 @@ class RADARLoss(nn.Module):
 
         loss_main = self.bce(outputs["logit"], labels_smoothed)
 
-        loss_branch = 0.5 * (
-            self.bce(outputs["badm_logit"], labels_smoothed) +
-            self.bce(outputs["aadm_logit"], labels_smoothed)
-        )
+        loss_branch = torch.tensor(0.0, device=labels.device)
+        if outputs["badm_logit"].numel() > 0 and outputs["aadm_logit"].numel() > 0:
+            loss_branch = 0.5 * (
+                self.bce(outputs["badm_logit"], labels_smoothed) +
+                self.bce(outputs["aadm_logit"], labels_smoothed)
+            )
 
-        badm_ev = F.normalize(outputs["badm_evidence"], dim=1)
-        aadm_ev = F.normalize(outputs["aadm_evidence"], dim=1)
-        cosine_sim = (badm_ev * aadm_ev).sum(dim=1)
-        loss_orthogonal = F.relu(torch.abs(cosine_sim) - self.config.orthogonality_margin).mean()
+        loss_orthogonal = torch.tensor(0.0, device=labels.device)
+        if outputs["badm_evidence"].numel() > 0 and outputs["aadm_evidence"].numel() > 0:
+            badm_norm = torch.norm(outputs["badm_evidence"], dim=1, keepdim=True)
+            aadm_norm = torch.norm(outputs["aadm_evidence"], dim=1, keepdim=True)
+
+            if (badm_norm > 1e-6).all() and (aadm_norm > 1e-6).all():
+                badm_ev = outputs["badm_evidence"] / (badm_norm + 1e-8)
+                aadm_ev = outputs["aadm_evidence"] / (aadm_norm + 1e-8)
+                cosine_sim = (badm_ev * aadm_ev).sum(dim=1)
+                loss_orthogonal = F.relu(torch.abs(cosine_sim) - self.config.orthogonality_margin).mean()
 
         loss_deep_supervision = torch.tensor(0.0, device=labels.device)
         if outputs["iteration_logits"].shape[1] >= 1:

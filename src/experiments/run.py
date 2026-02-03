@@ -50,24 +50,22 @@ def main():
         images, labels, config["train_ratio"], config["val_ratio"], config["seed"]
     )
 
-    domain_ids = [0] * len(train_images)
-
     train_dataset = DeepfakeDataset(
-        train_images, train_labels, domain_ids,
+        train_images, train_labels,
         get_train_transforms(config["img_size"]),
         config.get("preprocess_dir"),
         validate_cache=True
     )
 
     val_dataset = DeepfakeDataset(
-        val_images, val_labels, [0] * len(val_images),
+        val_images, val_labels,
         get_val_transforms(config["img_size"]),
         config.get("preprocess_dir"),
         validate_cache=False
     )
 
     test_dataset = DeepfakeDataset(
-        test_images, test_labels, [0] * len(test_images),
+        test_images, test_labels,
         get_val_transforms(config["img_size"]),
         config.get("preprocess_dir"),
         validate_cache=False

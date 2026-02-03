@@ -16,7 +16,7 @@ from method.loss import LossConfig
 
 
 def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
-                loss_fn, scaler, device: str, gradient_accumulation_steps: int) -> Tuple[Dict[str, float], int, float]:
+                loss_fn, scaler, device: str, gradient_accumulation_steps: int, config: dict) -> Tuple[Dict[str, float], int, float]:
     model.train()
     total_losses = {"total": 0, "main": 0, "branch": 0, "orthogonal": 0,
                    "deep_supervision": 0}
@@ -29,12 +29,12 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
     optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, batch_data in enumerate(loader):
-        if len(batch_data) == 4:
-            images, labels, _, extras = batch_data
+        if len(batch_data) == 3:
+            images, labels, extras = batch_data
             freq_cached = extras.get("freq_cached").to(device, non_blocking=True) if "freq_cached" in extras else None
             sobel_cached = extras.get("sobel_cached").to(device, non_blocking=True) if "sobel_cached" in extras else None
         else:
-            images, labels, _ = batch_data
+            images, labels = batch_data
             freq_cached = sobel_cached = None
 
         images = images.to(device, non_blocking=True)
@@ -84,12 +84,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
     all_convergence_deltas = []
 
     for batch_data in loader:
-        if len(batch_data) == 4:
-            images, labels, _, extras = batch_data
+        if len(batch_data) == 3:
+            images, labels, extras = batch_data
             freq_cached = extras.get("freq_cached").to(device) if "freq_cached" in extras else None
             sobel_cached = extras.get("sobel_cached").to(device) if "sobel_cached" in extras else None
         else:
-            images, labels, _ = batch_data
+            images, labels = batch_data
             freq_cached = sobel_cached = None
 
         images = images.to(device)
@@ -142,7 +142,7 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
         epoch_start = time.time()
 
         train_losses, skipped, grad_norm = train_epoch(model, train_loader, optimizer, scheduler,
-                                                          loss_fn, scaler, device, config["gradient_accumulation_steps"])
+                                                          loss_fn, scaler, device, config["gradient_accumulation_steps"], config)
         val_metrics = evaluate(model, val_loader, device,
                               use_badm=config.get("use_badm", True),
                               use_aadm=config.get("use_aadm", True))

@@ -1,0 +1,46 @@
+experiment_name: 'radar_cross_domain'
+
+seed: 42
+device: 'cuda'
+
+# Dataset configuration - Train on WildDeepfake, Test on FaceForensics++
+data_dir: './data'
+source_domain: 'wilddeepfake' # Training
+target_domain: 'ff_c23' # Testing (cross-domain generalization)
+preprocess_dir: null
+
+# Model architecture
+img_size: 224
+patch_size: 16
+embed_dim: 384
+evidence_dim: 64
+reasoning_iterations: 3
+reasoning_heads: 4
+fft_size: 112
+dropout: 0.1
+
+# Training hyperparameters
+batch_size: 64
+num_epochs: 30
+early_stopping_patience: 10
+learning_rate: 0.0005
+weight_decay: 0.05
+warmup_ratio: 0.1
+gradient_accumulation_steps: 2
+num_workers: 4
+
+# Data splits
+train_ratio: 0.8
+val_ratio: 0.1
+
+# Loss configuration
+lambda_main: 1.0
+lambda_branch: 0.3
+lambda_orthogonal: 0.1
+lambda_deep_supervision: 0.05
+label_smoothing: 0.1
+orthogonality_margin: 0.1
+
+# Feature toggles
+use_badm: true
+use_aadm: true

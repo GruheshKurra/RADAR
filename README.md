@@ -1,10 +1,127 @@
 # RADAR: Reasoning-Augmented Deepfake Artifact Recognition
 
+> **⚠️ DOCUMENTATION POLICY**: This project maintains a SINGLE README.md file. All documentation (quick start, setup, architecture, API) must be consolidated here. Do not create separate markdown files (QUICKSTART.md, SETUP.md, etc.). When LLMs interact with this codebase, they should merge all documentation into this README.md only.
+
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A novel deepfake detection framework that combines boundary and frequency artifact detection with iterative evidence refinement.
+
+---
+
+## 🚀 Quick Start (5 Minutes)
+
+```bash
+./setup_datasets.sh
+
+cd src/experiments
+python run.py --config configs/wilddeepfake.yaml --output ../../outputs
+```
+
+### Dataset Options
+
+**Option 1: WildDeepfake Only** (60k images, ~5GB, 10-20 min download)
+```bash
+./setup_datasets.sh
+```
+
+**Option 2: WildDeepfake + FaceForensics++** (130k images, ~20GB, ~1 hour setup)
+```bash
+curl -L -o ~/Downloads/ff-c23.zip https://www.kaggle.com/api/v1/datasets/download/xdxd003/ff-c23
+./setup_datasets.sh
+```
+
+---
+
+## 📦 Installation & Setup
+
+### Prerequisites
+```bash
+pip install torch torchvision timm albumentations opencv-python tqdm
+pip install datasets scikit-learn matplotlib seaborn
+```
+
+### Critical Implementation Notes
+
+**Artifact Detection (BADM & AADM):**
+- Both modules now **compute features on-the-fly** if cache is missing
+- BADM: Sobel edge detection computed in-module (no silent zeros)
+- AADM: FFT + high-pass filter computed in-module (no silent zeros)
+- Preprocessing cache still recommended for 4x speedup
+
+**Model Architecture:**
+- External classifier ensemble: `(reasoning_logit + external_logit) / 2`
+- Orthogonality loss: Safe handling of zero/disabled branches
+- ViT encoder: Always pretrained (timm vit_small_patch16_224)
+
+**Preprocessing:**
+- Hash based on **file content** (not path) for cache consistency
+- Cache survives file moves and dataset copies
+- Fallback to path hash if file read fails
+
+**Dataset:**
+- Domain IDs removed (unused feature)
+- Clean 2-tuple or 3-tuple returns: `(image, label[, extras])`
+- Simplified dataloader integration
+
+### Dataset Setup
+
+**Check Dataset Status:**
+```bash
+python src/data/download_datasets.py --datasets check
+```
+
+**Download WildDeepfake** (automatic):
+```bash
+python src/data/download_datasets.py --datasets wilddeepfake --output_dir ./data
+```
+
+**Setup FaceForensics++** (manual + extraction):
+```bash
+curl -L -o ~/Downloads/ff-c23.zip https://www.kaggle.com/api/v1/datasets/download/xdxd003/ff-c23
+
+unzip ~/Downloads/ff-c23.zip -d ~/Downloads/ff-c23
+
+python src/data/extract_frames.py \
+  --ff_root ~/Downloads/ff-c23 \
+  --output_root ./data \
+  --num_frames 10 \
+  --num_workers 8
+```
+
+### Training
+
+**In-Domain Evaluation:**
+```bash
+cd src/experiments
+python run.py --config configs/wilddeepfake.yaml --output ../../outputs
+```
+
+**Cross-Domain Generalization:**
+```bash
+python run.py --config configs/cross_domain.yaml --output ../../outputs
+```
+
+### Expected Output Structure
+```
+data/
+├── wilddeepfake/
+│   ├── real/ (~30k images)
+│   └── fake/ (~30k images)
+└── ff_c23/
+    ├── real/ (~10k images)
+    └── fake/ (~60k images)
+
+outputs/
+└── [experiment_name]/
+    ├── config.yaml
+    ├── metrics.json
+    ├── best.pth
+    └── logs.txt
+```
+
+---
 
 ## 🎯 Key Features
 
@@ -318,7 +435,7 @@ CLS Token (from ViT) ────────────┐
 
 **Theoretical Framework:**
 
-ERM implements iterative Bayesian evidence aggregation. Given evidence vectors `e_B` (BADM) and `e_A` (AADM), the posterior probability is refined through T iterations:
+ERM implements iterative evidence aggregation. Given evidence vectors `e_B` (BADM) and `e_A` (AADM), the posterior probability is refined through T iterations:
 
 ```
 h₀ = f_init([e_B; e_A])                    # Initial belief state
@@ -326,18 +443,9 @@ h₀ = f_init([e_B; e_A])                    # Initial belief state
 For t = 1 to T:
     α_t = softmax(Q(h_{t-1}) @ K([e_B, e_A]))   # Evidence attention
     c_t = α_t @ V([e_B, e_A])                   # Attended context
-    h_t = GRU(c_t + g(p_{t-1}), h_{t-1})        # Belief update
+    h_t = GRU(c_t, h_{t-1})                     # Belief update
     p_t = σ(f_pred(h_t))                        # Posterior estimate
 ```
-
-**Convergence Properties:**
-
-1. **Contraction**: GRU with residual scaling γ < 1 ensures:
-   `||h_t - h*|| ≤ γ^t ||h₀ - h*||`
-
-2. **Monotonic refinement**: Deep supervision encourages decreasing loss across iterations
-
-3. **Attention stabilization**: Cross-attention weights converge as belief stabilizes
 
 **Architecture Details:**
 
@@ -345,71 +453,35 @@ For t = 1 to T:
 class EvidenceRefinementModule:
 
     Components:
-    1. Evidence Normalization:
-       - LayerNorm for both BADM and AADM evidence
-
-    2. State Initialization:
+    1. State Initialization:
        - Linear(128→64): Concatenated evidence → initial state
-       - GELU activation
-       - LayerNorm
+       - ReLU activation
 
-    3. Cross-Attention Mechanism:
+    2. Cross-Attention Mechanism:
        - Multi-head attention (4 heads, dim=64)
        - Query: Current belief state [B, 64]
        - Key/Value: Stacked evidence [B, 2, 64]
        - Output: Attended context + attention weights
 
-    4. Evidence Gating:
-       - Input: [state; current_prob] → [B, 65]
-       - Linear(65→64) → GELU → Linear(64→2) → Sigmoid
-       - Output: Per-source weights [B, 2] applied to evidence
-
-    5. State Update:
+    3. State Update:
        - GRUCell(input_size=64, hidden_size=64)
-       - Residual connection with learnable scale
-       - LayerNorm
+       - Updates hidden state with attended evidence
 
-    6. Iteration Predictor:
-       - Linear(64→32) → GELU → Dropout → Linear(32→1)
+    4. Iteration Predictor:
+       - Linear(64→1)
        - Produces intermediate predictions at each iteration
-
-    7. Prediction Feedback (optional):
-       - Linear(1→64) projects previous prediction
-       - Added to GRU input for temporal consistency
 ```
 
-**Iteration Flow:**
+**Current Implementation:**
+- ✅ Cross-attention over evidence sources
+- ✅ GRU-based state updates
+- ✅ Iterative predictions with deep supervision
+- ✅ Attention weight visualization
 
-```
-Initial State: h₀ = f_init([e_B; e_A])
-
-Iteration 1:
-    gate = sigmoid(Linear([h₀; p₀]))      # p₀ = 0.5 (neutral)
-    evidence_gated = [e_B, e_A] * gate    # Element-wise scaling
-    context, attn₁ = CrossAttn(h₀, evidence_gated)
-    gru_input = context + pred_feedback   # Optional
-    h₁ = GRU(gru_input, h₀)
-    h₁ = h₀ + γ·(h₁ - h₀)                 # Residual with scale γ
-    p₁ = sigmoid(Linear(h₁))
-
-Iteration 2:
-    gate = sigmoid(Linear([h₁; p₁]))
-    evidence_gated = [e_B, e_A] * gate
-    context, attn₂ = CrossAttn(h₁, evidence_gated)
-    gru_input = context + pred_feedback(p₁)
-    h₂ = GRU(gru_input, h₁)
-    h₂ = h₁ + γ·(h₂ - h₁)
-    p₂ = sigmoid(Linear(h₂))
-
-Iteration 3 (Final):
-    gate = sigmoid(Linear([h₂; p₂]))
-    evidence_gated = [e_B, e_A] * gate
-    context, attn₃ = CrossAttn(h₂, evidence_gated)
-    gru_input = context + pred_feedback(p₂)
-    h₃ = GRU(gru_input, h₂)
-    h₃ = h₂ + γ·(h₃ - h₂)
-    p₃ = sigmoid(Linear(h₃))  ← Final prediction
-```
+**Future Extensions (not yet implemented):**
+- Evidence gating mechanism
+- Prediction feedback loops
+- Residual scaling with learnable γ
 
 ### 5. Complete RADAR Model
 
@@ -904,6 +976,114 @@ After training, the following are generated:
 ├── attention_evolution.png        # Attention over iterations
 └── [experiment-specific files]
 ```
+
+---
+
+## Configuration Reference
+
+### Training Config Files
+
+**wilddeepfake.yaml** - In-domain evaluation:
+```yaml
+experiment_name: 'radar_wilddeepfake'
+source_domain: 'wilddeepfake'
+target_domain: 'wilddeepfake'
+batch_size: 64
+num_epochs: 30
+learning_rate: 0.0005
+```
+
+**cross_domain.yaml** - Cross-domain generalization:
+```yaml
+experiment_name: 'radar_cross_domain'
+source_domain: 'wilddeepfake'
+target_domain: 'ff_c23'
+batch_size: 64
+num_epochs: 30
+```
+
+### Key Parameters
+
+**Model Architecture:**
+- `img_size`: 224 (input image size)
+- `embed_dim`: 384 (ViT embedding dimension)
+- `evidence_dim`: 64 (BADM/AADM evidence vector size)
+- `reasoning_iterations`: 3 (ERM iterations)
+- `reasoning_heads`: 4 (attention heads)
+
+**Loss Weights:**
+- `lambda_main`: 1.0 (final classification)
+- `lambda_branch`: 0.3 (BADM + AADM supervision)
+- `lambda_orthogonal`: 0.1 (feature disentanglement)
+- `lambda_deep_supervision`: 0.05 (iterative refinement)
+- `label_smoothing`: 0.1
+- `orthogonality_margin`: 0.1
+
+**Training:**
+- `batch_size`: 64 (adjust based on GPU memory)
+- `gradient_accumulation_steps`: 2 (effective batch = 128)
+- `learning_rate`: 0.0005
+- `weight_decay`: 0.05
+- `warmup_ratio`: 0.1
+- `early_stopping_patience`: 10
+
+---
+
+## Troubleshooting
+
+### GPU Out of Memory
+```yaml
+batch_size: 32
+gradient_accumulation_steps: 4
+```
+
+### Dataset Not Found
+```bash
+python src/data/download_datasets.py --datasets check
+```
+
+### Training Too Slow
+Enable preprocessing cache for 4x speedup:
+```yaml
+preprocess_dir: './preprocessed'
+```
+Then run:
+```bash
+python src/data/preprocess_features.py --dataset wilddeepfake
+```
+
+### WildDeepfake Download Fails
+```bash
+pip install --upgrade datasets huggingface_hub
+huggingface-cli login
+```
+
+### FaceForensics++ Frame Extraction Slow
+```bash
+python src/data/extract_frames.py \
+  --ff_root ~/Downloads/ff-c23 \
+  --output_root ./data \
+  --num_frames 5 \
+  --num_workers 16
+```
+
+---
+
+## Monitoring Training
+
+During training, monitor:
+```
+Epoch 1/30: Loss=0.4521, AUC=0.8234, Acc=0.7823, ConvDelta=0.0156, Time=45.2s
+Epoch 2/30: Loss=0.3012, AUC=0.8891, Acc=0.8456, ConvDelta=0.0098, Time=44.8s
+...
+Best Val AUC: 0.9567, Test AUC: 0.9523
+```
+
+**Key Metrics:**
+- `Loss`: Total training loss (should decrease)
+- `AUC`: Area under ROC curve (should increase)
+- `Acc`: Classification accuracy
+- `ConvDelta`: ERM convergence (closer to 0 = more stable)
 
 ---
 

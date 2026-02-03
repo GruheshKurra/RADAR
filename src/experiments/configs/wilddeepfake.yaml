@@ -1,0 +1,47 @@
+experiment_name: 'radar_wilddeepfake'
+
+seed: 42
+device: 'cuda'
+
+# Dataset configuration
+data_dir: './data'
+source_domain: 'wilddeepfake'
+target_domain: 'wilddeepfake' # Same for in-domain evaluation
+preprocess_dir: null # Set to './preprocessed' after running preprocess_features.py
+
+# Model architecture
+img_size: 224
+patch_size: 16
+embed_dim: 384
+evidence_dim: 64
+reasoning_iterations: 3
+reasoning_heads: 4
+fft_size: 112
+dropout: 0.1
+
+# Training hyperparameters
+batch_size: 64 # Reduced for single dataset
+num_epochs: 30
+early_stopping_patience: 10
+learning_rate: 0.0005
+weight_decay: 0.05
+warmup_ratio: 0.1
+gradient_accumulation_steps: 2 # Effective batch = 128
+num_workers: 4
+
+# Data splits
+train_ratio: 0.8
+val_ratio: 0.1
+# test_ratio: 0.1 (implicit)
+
+# Loss configuration
+lambda_main: 1.0
+lambda_branch: 0.3
+lambda_orthogonal: 0.1
+lambda_deep_supervision: 0.05
+label_smoothing: 0.1
+orthogonality_margin: 0.1
+
+# Feature toggles (for ablation)
+use_badm: true
+use_aadm: true

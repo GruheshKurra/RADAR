@@ -60,7 +60,11 @@ def preprocess_image(img_path: Path, output_dir: Path,
                      freq_extractor: FrequencyExtractor,
                      edge_extractor: EdgeExtractor) -> bool:
     try:
-        image = cv2.imread(str(img_path))
+        with open(img_path, 'rb') as f:
+            img_content = f.read()
+        img_hash = hashlib.md5(img_content).hexdigest()
+
+        image = cv2.imdecode(np.frombuffer(img_content, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return False
 
@@ -68,8 +72,6 @@ def preprocess_image(img_path: Path, output_dir: Path,
 
         freq_features = freq_extractor(image_rgb)
         edge_features = edge_extractor(image_rgb)
-
-        img_hash = hashlib.md5(str(img_path).encode()).hexdigest()[:16]
 
         freq_path = output_dir / f"{img_hash}_freq.npy"
         edge_path = output_dir / f"{img_hash}_sobel.npy"

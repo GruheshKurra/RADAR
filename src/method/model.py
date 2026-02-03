@@ -68,8 +68,18 @@ class BoundaryArtifactDetector(nn.Module):
     def forward(self, image: torch.Tensor, patch_features: torch.Tensor,
                 sobel_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if sobel_cached is None:
-            sobel_cached = torch.zeros(image.shape[0], 1, image.shape[2], image.shape[3],
-                                      device=image.device, dtype=image.dtype)
+            gray = 0.299 * image[:, 0] + 0.587 * image[:, 1] + 0.114 * image[:, 2]
+            gray = gray.unsqueeze(1)
+
+            sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                  dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
+            sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                  dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
+
+            grad_x = F.conv2d(gray, sobel_x, padding=1)
+            grad_y = F.conv2d(gray, sobel_y, padding=1)
+            sobel_cached = torch.sqrt(grad_x**2 + grad_y**2)
+            sobel_cached = sobel_cached / (sobel_cached.max() + 1e-8)
             sobel_cached = sobel_cached.repeat(1, 3, 1, 1)
 
         edges = sobel_cached.unsqueeze(1) if sobel_cached.dim() == 3 else sobel_cached
@@ -125,8 +135,27 @@ class FrequencyArtifactDetector(nn.Module):
     def forward(self, raw_image: torch.Tensor, cls_token: torch.Tensor,
                 freq_cached: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if freq_cached is None:
-            freq_cached = torch.zeros((raw_image.shape[0], self.fft_size, self.fft_size),
-                                     device=raw_image.device, dtype=raw_image.dtype)
+            gray = 0.299 * raw_image[:, 0] + 0.587 * raw_image[:, 1] + 0.114 * raw_image[:, 2]
+
+            if gray.shape[-1] != self.fft_size:
+                gray = F.interpolate(gray.unsqueeze(1), size=(self.fft_size, self.fft_size),
+                                    mode='bilinear', align_corners=False).squeeze(1)
+
+            fft = torch.fft.fft2(gray)
+            fft_shifted = torch.fft.fftshift(fft)
+            magnitude = torch.abs(fft_shifted)
+
+            H, W = magnitude.shape[-2:]
+            center_y, center_x = H // 2, W // 2
+            y, x = torch.meshgrid(torch.arange(H, device=gray.device),
+                                 torch.arange(W, device=gray.device), indexing='ij')
+            dist = torch.sqrt((x - center_x)**2 + (y - center_y)**2)
+            cutoff = min(H, W) / 8
+            high_pass = torch.sigmoid((dist - cutoff) / 10)
+
+            magnitude = magnitude * high_pass.unsqueeze(0)
+            freq_cached = torch.log1p(magnitude)
+            freq_cached = (freq_cached - freq_cached.min()) / (freq_cached.max() - freq_cached.min() + 1e-8)
 
         magnitude = freq_cached.unsqueeze(1) if freq_cached.dim() == 3 else freq_cached
         if magnitude.shape[-1] != self.fft_size:
@@ -261,6 +290,14 @@ class RADAR(nn.Module):
             config.reasoning_iterations, config.dropout
         )
 
+        self.external_classifier = nn.Sequential(
+            nn.Linear(config.evidence_dim * 2, config.evidence_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.evidence_dim, 1)
+        )
+        self.external_classifier.apply(_init_weights)
+
     def forward(self, x: torch.Tensor, freq_cached: Optional[torch.Tensor] = None,
                 sobel_cached: Optional[torch.Tensor] = None, use_badm: bool = True,
                 use_aadm: bool = True) -> Dict[str, torch.Tensor]:
@@ -282,6 +319,14 @@ class RADAR(nn.Module):
 
         if evidence_list:
             reasoning_out = self.reasoning(*evidence_list)
+
+            if len(evidence_list) == 2:
+                external_input = torch.cat(evidence_list, dim=1)
+                external_logit = self.external_classifier(external_input)
+                final_logit = (reasoning_out["final_logit"] + external_logit) / 2
+            else:
+                external_logit = torch.zeros(B, 1, device=device)
+                final_logit = reasoning_out["final_logit"]
         else:
             B = x.shape[0]
             device = x.device
@@ -292,15 +337,18 @@ class RADAR(nn.Module):
                 "attention_history": torch.zeros(B, self.config.reasoning_iterations, 0, device=device),
                 "convergence_delta": torch.tensor(0.0, device=device),
             }
+            external_logit = torch.zeros(B, 1, device=device)
+            final_logit = torch.zeros(B, 1, device=device)
 
         return {
-            "logit": reasoning_out["final_logit"],
-            "prob": torch.sigmoid(reasoning_out["final_logit"]),
-            "badm_logit": badm_out["logit"] if badm_out is not None else torch.tensor(0.0),
-            "badm_score": badm_out["score"] if badm_out is not None else torch.tensor(0.0),
+            "logit": final_logit,
+            "prob": torch.sigmoid(final_logit),
+            "external_logit": external_logit,
+            "badm_logit": badm_out["logit"] if badm_out is not None else torch.zeros(B, 1, device=device),
+            "badm_score": badm_out["score"] if badm_out is not None else torch.zeros(B, 1, device=device),
             "badm_evidence": badm_out["evidence"] if badm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
-            "aadm_logit": aadm_out["logit"] if aadm_out is not None else torch.tensor(0.0),
-            "aadm_score": aadm_out["score"] if aadm_out is not None else torch.tensor(0.0),
+            "aadm_logit": aadm_out["logit"] if aadm_out is not None else torch.zeros(B, 1, device=device),
+            "aadm_score": aadm_out["score"] if aadm_out is not None else torch.zeros(B, 1, device=device),
             "aadm_evidence": aadm_out["evidence"] if aadm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
             "attention_history": reasoning_out["attention_history"],
             "iteration_logits": reasoning_out["iteration_logits"],
