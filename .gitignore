@@ -11,3 +11,18 @@ build/
 *.npy
 .vscode/
 .idea/
+
+# Claude Code artifacts
+.agents/
+.github/
+.claude/
+
+# Data and outputs
+data/
+outputs/
+exports/
+*.zip
+
+# Cache directories
+*_cache/
+.cache/
