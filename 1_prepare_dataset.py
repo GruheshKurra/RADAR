@@ -29,19 +29,22 @@ def save_image(args):
         return None
 
 
-def download_wilddeepfake(output_dir: Path):
+def download_wilddeepfake(output_dir: Path, max_images: int = None):
     print("\n" + "="*70)
     print("[1/3] DOWNLOADING WILDDEEPFAKE FROM HUGGINGFACE")
     print("="*70)
-    print("Dataset: ~1.16M images (994k train + 165k test)")
-    print("Size: ~10GB")
+    if max_images:
+        print(f"Dataset: Limited to {max_images:,} images (memory-efficient mode)")
+    else:
+        print("Dataset: ~1.16M images (994k train + 165k test)")
+    print("Size: Varies based on limit")
     print("="*70)
 
     try:
         num_proc = max(1, mp.cpu_count() - 2)
         print(f"\nLoading dataset with {num_proc} processes...")
         print("This may take several minutes for large datasets...\n")
-        ds = load_dataset("xingjunm/WildDeepfake", num_proc=num_proc)
+        ds = load_dataset("xingjunm/WildDeepfake", num_proc=num_proc, streaming=False)
 
         wild_dir = output_dir / "wilddeepfake"
         real_dir = wild_dir / "real"
@@ -50,18 +53,30 @@ def download_wilddeepfake(output_dir: Path):
         fake_dir.mkdir(parents=True, exist_ok=True)
 
         print("\n" + "="*70)
-        print("[2/3] ORGANIZING DATASET INTO REAL/FAKE FOLDERS")
+        print("[2/3] STREAMING DATASET PROCESSING (MEMORY-EFFICIENT)")
         print("="*70)
 
-        save_tasks = []
         stats = {"train_real": 0, "train_fake": 0, "test_real": 0, "test_fake": 0}
+        total_saved = 0
+        save_batch = []
+        batch_size = 1000
 
         for split_name in ["train", "test"]:
             if split_name in ds:
                 split_size = len(ds[split_name])
                 print(f"\nProcessing {split_name} split ({split_size:,} images)...")
 
-                for idx, sample in enumerate(tqdm(ds[split_name], desc=f"  Organizing {split_name}", unit="img")):
+                if max_images and total_saved >= max_images:
+                    print(f"Reached limit of {max_images:,} images, stopping.")
+                    break
+
+                pbar = tqdm(total=min(split_size, max_images - total_saved if max_images else split_size),
+                           desc=f"  Saving {split_name}", unit="img")
+
+                for idx, sample in enumerate(ds[split_name]):
+                    if max_images and total_saved >= max_images:
+                        break
+
                     try:
                         img = sample.get("png") or sample.get("image") or sample.get("img")
 
@@ -81,36 +96,38 @@ def download_wilddeepfake(output_dir: Path):
                         if img is not None and (is_fake or is_real):
                             target_dir = real_dir if is_real else fake_dir
                             img_path = target_dir / f"{split_name}_{idx:07d}.jpg"
-                            save_tasks.append((img, img_path))
+                            save_batch.append((img, img_path))
 
                             if is_real:
                                 stats[f"{split_name}_real"] += 1
                             else:
                                 stats[f"{split_name}_fake"] += 1
+
+                            if len(save_batch) >= batch_size:
+                                max_workers = min(16, mp.cpu_count())
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    results = list(executor.map(save_image, save_batch))
+                                successful = sum(1 for r in results if r is not None)
+                                total_saved += successful
+                                pbar.update(successful)
+                                save_batch = []
+
+                                if max_images and total_saved >= max_images:
+                                    break
                     except:
                         continue
 
-        print("\n" + "="*70)
-        print(f"[3/3] SAVING {len(save_tasks):,} IMAGES TO DISK")
-        print("="*70)
-        print(f"Train: {stats['train_real']:,} real + {stats['train_fake']:,} fake")
-        print(f"Test:  {stats['test_real']:,} real + {stats['test_fake']:,} fake")
+                if save_batch:
+                    max_workers = min(16, mp.cpu_count())
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        results = list(executor.map(save_image, save_batch))
+                    successful = sum(1 for r in results if r is not None)
+                    total_saved += successful
+                    pbar.update(successful)
+                    save_batch = []
 
-        max_workers = min(32, mp.cpu_count() * 2)
-        print(f"\nUsing {max_workers} parallel workers for maximum speed...")
-        print("Estimated time: 5-15 minutes depending on your system\n")
+                pbar.close()
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(tqdm(
-                executor.map(save_image, save_tasks),
-                total=len(save_tasks),
-                desc="  Saving images",
-                unit="img",
-                ncols=80,
-                smoothing=0.1
-            ))
-
-        successful = sum(1 for r in results if r is not None)
         real_count = len(list(real_dir.glob('*.jpg')))
         fake_count = len(list(fake_dir.glob('*.jpg')))
 
@@ -121,7 +138,10 @@ def download_wilddeepfake(output_dir: Path):
         print(f"Real images: {real_count:,}")
         print(f"Fake images: {fake_count:,}")
         print(f"Total: {real_count + fake_count:,}")
-        print(f"Success rate: {successful}/{len(save_tasks)} ({100*successful/len(save_tasks):.1f}%)")
+        if max_images:
+            print(f"Requested limit: {max_images:,}")
+        print(f"Train: {stats['train_real']:,} real + {stats['train_fake']:,} fake")
+        print(f"Test:  {stats['test_real']:,} real + {stats['test_fake']:,} fake")
         print("="*70 + "\n")
 
         return True
@@ -166,15 +186,18 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare WildDeepfake dataset for RADAR training")
     parser.add_argument("--output_dir", type=str, default="./data", help="Output directory for datasets")
     parser.add_argument("--check_only", action="store_true", help="Only check dataset status without downloading")
+    parser.add_argument("--max_images", type=int, default=300000, help="Maximum images to download (default: 300000)")
+    parser.add_argument("--force", action="store_true", help="Force re-download even if dataset exists")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "="*70)
-    print("RADAR DATASET PREPARATION")
+    print("RADAR DATASET PREPARATION (MEMORY-EFFICIENT MODE)")
     print("="*70)
     print(f"Output directory: {output_dir.absolute()}")
+    print(f"Max images: {args.max_images:,} (prevents memory overflow)")
     print("="*70)
 
     if args.check_only:
@@ -182,11 +205,11 @@ def main():
         sys.exit(0 if exists else 1)
 
     existing = check_dataset_status(output_dir)
-    if existing:
+    if existing and not args.force:
         print("Dataset already exists. Use --force to re-download.\n")
         sys.exit(0)
 
-    success = download_wilddeepfake(output_dir)
+    success = download_wilddeepfake(output_dir, max_images=args.max_images)
 
     if success:
         check_dataset_status(output_dir)

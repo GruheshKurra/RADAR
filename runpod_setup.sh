@@ -35,9 +35,10 @@ pip install -q --no-cache-dir datasets huggingface_hub Pillow tqdm opencv-python
     matplotlib seaborn pyyaml 2>&1 | grep -v "already satisfied" || true
 
 echo ""
-echo "Downloading WildDeepfake dataset..."
+echo "Downloading WildDeepfake dataset (LIMITED TO 300K IMAGES)..."
+echo "This prevents memory overflow and pod disconnection"
 
-python3 src/data/download_datasets.py --datasets wilddeepfake --output_dir "$PROJECT_DIR/data" --workspace_root "$PROJECT_DIR"
+python3 src/data/download_datasets.py --datasets wilddeepfake --output_dir "$PROJECT_DIR/data" --workspace_root "$PROJECT_DIR" --max_images 300000
 
 echo ""
 echo "Cleaning up cache and temporary files..."

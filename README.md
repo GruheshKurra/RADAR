@@ -2,6 +2,8 @@
 
 > **⚠️ DOCUMENTATION POLICY**: This project maintains a SINGLE README.md file. All documentation must be consolidated here.
 
+> **🚨 MEMORY FIX (2026-02-04)**: Fixed RunPod memory overflow bug! Stream processing now prevents pod crashes. Default: 300k images. See [RUNPOD_GUIDE.md](RUNPOD_GUIDE.md)
+
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -168,17 +170,25 @@ exports/
 
 ## ☁️ RunPod Setup
 
+> **🚨 MEMORY OVERFLOW FIX**: Scripts now use stream processing with 300k image limit by default (prevents pod crashes)
+
 ### Automated Setup (Zero Manual Work)
 
 **1. Upload project to /workspace/**
 ```bash
-cd /workspace
+cd /workspace/RADAR-Clean
 ```
 
-**2. Run complete pipeline**
+**2. Run complete pipeline (RECOMMENDED)**
 ```bash
-bash run_complete_pipeline.sh
+bash run_fast_pipeline.sh
 ```
+
+**What changed**:
+- ✅ Stream processing (saves images as we go, not after loading all)
+- ✅ Configurable image limit (`--max_images`)
+- ✅ Default: 300k images (prevents memory overflow)
+- ✅ No more pod crashes at 18%
 
 ### RunPod-Specific Script
 
@@ -190,9 +200,10 @@ bash runpod_setup.sh
 
 This handles:
 - Environment variables for /workspace
-- Parallel downloads
+- Memory-efficient stream processing
 - Automatic cleanup
 - Cache management
+- Limited to 300k images (safe default)
 
 ### Data Locations on RunPod
 ```

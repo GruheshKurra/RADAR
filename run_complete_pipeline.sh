@@ -11,12 +11,14 @@ EXPORT_DIR="./exports"
 EXPERIMENT_NAME="radar_wilddeepfake_$(date +%Y%m%d_%H%M%S)"
 
 echo "========================================================================"
-echo "RADAR COMPLETE TRAINING PIPELINE"
+echo "RADAR COMPLETE TRAINING PIPELINE (MEMORY-EFFICIENT)"
 echo "========================================================================"
 echo "This script will:"
-echo "  1. Download and prepare WildDeepfake dataset (~10GB)"
-echo "  2. Train RADAR model (35-50 hours on A40)"
+echo "  1. Download 300k images (memory-safe limit)"
+echo "  2. Train RADAR model (6-10 hours on A40)"
 echo "  3. Export and package results for download"
+echo ""
+echo "NOTE: Limited to 300k images to prevent memory overflow and disconnection"
 echo ""
 echo "Experiment: $EXPERIMENT_NAME"
 echo "Data directory: $DATA_DIR"
@@ -29,9 +31,9 @@ read -p "Press ENTER to start or Ctrl+C to cancel..." dummy
 
 echo ""
 echo "========================================================================"
-echo "STEP 1/3: DATASET PREPARATION"
+echo "STEP 1/3: DATASET PREPARATION (300K IMAGES)"
 echo "========================================================================"
-python3 1_prepare_dataset.py --output_dir "$DATA_DIR"
+python3 1_prepare_dataset.py --output_dir "$DATA_DIR" --max_images 300000
 
 if [ $? -ne 0 ]; then
     echo "✗ Dataset preparation failed"
