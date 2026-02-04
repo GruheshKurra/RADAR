@@ -64,10 +64,23 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
         save_batch = []
         batch_size = 1000
 
+        debug_printed = False
         for split_name in ["train", "test"]:
             if split_name in ds:
                 split_size = len(ds[split_name])
                 print(f"\nProcessing {split_name} split ({split_size:,} images)...")
+
+                if not debug_printed:
+                    try:
+                        sample = ds[split_name][0]
+                        print(f"\n  Sample structure debug:")
+                        print(f"    Available keys: {list(sample.keys())}")
+                        for k, v in sample.items():
+                            if k not in ["png", "image", "img"]:
+                                print(f"    {k}: {repr(v)[:100]}")
+                        debug_printed = True
+                    except:
+                        pass
 
                 if max_images and total_saved >= max_images:
                     print(f"Reached limit of {max_images:,} images, stopping.")
@@ -88,18 +101,31 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                     try:
                         img = sample.get("png") or sample.get("image") or sample.get("img")
 
+                        is_fake = False
+                        is_real = False
+
                         key = sample.get("__key__", "")
-                        is_fake = "fake" in key.lower()
-                        is_real = "real" in key.lower()
+                        if key:
+                            key_lower = key.lower()
+                            key_parts = key_lower.replace("\\", "/").split("/")
+                            for part in key_parts:
+                                if part == "fake":
+                                    is_fake = True
+                                    break
+                                elif part == "real":
+                                    is_real = True
+                                    break
 
                         if not is_fake and not is_real:
-                            label = sample.get("label", "")
-                            if isinstance(label, str):
-                                is_fake = "fake" in label.lower()
-                                is_real = "real" in label.lower()
-                            else:
-                                is_fake = label == 1
-                                is_real = label == 0
+                            label = sample.get("label", sample.get("cls", sample.get("class", None)))
+                            if label is not None:
+                                if isinstance(label, str):
+                                    label_lower = label.lower().strip()
+                                    is_fake = label_lower in ("fake", "1", "deepfake", "manipulated")
+                                    is_real = label_lower in ("real", "0", "original", "authentic")
+                                elif isinstance(label, (int, float)):
+                                    is_fake = int(label) == 1
+                                    is_real = int(label) == 0
 
                         if img is not None and (is_fake or is_real):
                             total_real = stats["train_real"] + stats["test_real"]

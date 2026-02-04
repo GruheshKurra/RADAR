@@ -26,8 +26,13 @@ def load_domain_data(data_dir: Path, domain: str) -> Tuple[List[Path], List[int]
 
     real_count = labels.count(0)
     fake_count = labels.count(1)
-    if real_count < 3 or fake_count < 3:
-        raise ValueError(f"Insufficient samples in {domain}: real={real_count}, fake={fake_count}")
+    min_required = 100
+    if real_count < min_required or fake_count < min_required:
+        raise ValueError(
+            f"Insufficient samples in {domain}: real={real_count}, fake={fake_count}. "
+            f"Need at least {min_required} of each class. "
+            f"Check 1_prepare_dataset.py - the dataset may not have been downloaded correctly."
+        )
 
     return images, labels
 
