@@ -146,7 +146,11 @@ def main():
     if torch.cuda.is_available():
         gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         optimal_batch = 128 if gpu_mem_gb > 40 else 64
-        optimal_workers = min(12, mp.cpu_count())
+        optimal_workers = min(8, max(1, mp.cpu_count() - 1))
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"VRAM: {gpu_mem_gb:.1f}GB")
+        print(f"Optimal batch size: {optimal_batch}")
+        print(f"Optimal workers: {optimal_workers}")
     else:
         optimal_batch = args.batch_size
         optimal_workers = 4
