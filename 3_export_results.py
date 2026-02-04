@@ -22,15 +22,18 @@ def create_results_package(results_dir: Path, output_path: Path):
         print(f"✗ Error: Results directory not found: {results_dir}")
         return False
 
-    required_files = ["best.pth", "config.json", "metrics.json"]
+    required_files = ["best.pth", "metrics.json"]
+    config_file = "config.yaml" if (results_dir / "config.yaml").exists() else "config.json"
+    required_files.append(config_file)
+
     missing_files = [f for f in required_files if not (results_dir / f).exists()]
 
     if missing_files:
         print(f"✗ Error: Missing required files: {', '.join(missing_files)}")
         return False
 
-    with open(results_dir / "metrics.json", 'r') as f:
-        metrics = json.load(f)
+    with open(results_dir / "metrics.json", 'r') as metrics_file:
+        metrics = json.load(metrics_file)
 
     print("Collecting files...")
     files_to_zip = []
@@ -62,7 +65,7 @@ Test Accuracy: {metrics.get('test_metrics', {}).get('accuracy', 'N/A'):.4f}
 Contents:
 ---------
 - best.pth: Best model checkpoint
-- config.json: Training configuration
+- config.yaml or config.json: Training configuration
 - metrics.json: Training history and test results
 
 To load the model:

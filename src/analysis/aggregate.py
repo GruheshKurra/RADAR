@@ -6,15 +6,23 @@ import pandas as pd
 
 
 def load_experiment_results(output_dir: Path) -> Dict:
+    import yaml
+
     metrics_path = output_dir / "metrics.json"
-    config_path = output_dir / "config.yaml"
+    config_yaml = output_dir / "config.yaml"
+    config_json = output_dir / "config.json"
 
     with open(metrics_path, 'r') as f:
         metrics = json.load(f)
 
-    import yaml
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    if config_yaml.exists():
+        with open(config_yaml, 'r') as f:
+            config = yaml.safe_load(f)
+    elif config_json.exists():
+        with open(config_json, 'r') as f:
+            config = json.load(f)
+    else:
+        raise FileNotFoundError(f"No config file found in {output_dir}")
 
     return {"metrics": metrics, "config": config}
 

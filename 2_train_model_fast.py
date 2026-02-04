@@ -9,6 +9,7 @@ from pathlib import Path
 import random
 import numpy as np
 import json
+import yaml
 import time
 from datetime import datetime
 from tqdm import tqdm
@@ -23,6 +24,7 @@ os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent / 'data' / 'torch_cache
 from method import RADAR, RADARConfig, RADARLoss, LossConfig
 from data.dataset import DeepfakeDataset, get_train_transforms, get_val_transforms
 from data.splits import load_domain_data, create_stratified_split
+from experiments.train import train_epoch as _train_epoch, evaluate as _evaluate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.amp import GradScaler, autocast
@@ -40,82 +42,14 @@ def set_seed(seed: int):
 
 
 def train_epoch(model, loader, optimizer, scheduler, loss_fn, scaler, device, gradient_accumulation_steps):
-    model.train()
-    total_losses = {"total": 0, "main": 0, "branch": 0, "orthogonal": 0, "deep_supervision": 0}
-    num_batches = 0
-    skipped_batches = 0
-
-    optimizer.zero_grad(set_to_none=True)
-
-    pbar = tqdm(loader, desc="Training", ncols=100)
-    for batch_idx, batch_data in enumerate(pbar):
-        if len(batch_data) == 3:
-            images, labels, extras = batch_data
-            sobel_cached = extras.get("sobel_cached").to(device, non_blocking=True) if "sobel_cached" in extras else None
-        else:
-            images, labels = batch_data
-            sobel_cached = None
-
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        with autocast(device_type=device, enabled=(device=="cuda")):
-            outputs = model(images, freq_cached=None, sobel_cached=sobel_cached, use_badm=True, use_aadm=True)
-            losses = loss_fn(outputs, labels, use_badm=True, use_aadm=True)
-            loss = losses["total"] / gradient_accumulation_steps
-
-        if not torch.isfinite(loss):
-            skipped_batches += 1
-            continue
-
-        scaler.scale(loss).backward()
-
-        for k, v in losses.items():
-            total_losses[k] += v.item()
-        num_batches += 1
-
-        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(loader):
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
-
-        pbar.set_postfix({"loss": f"{total_losses['total']/max(num_batches,1):.4f}"})
-
-    return {k: v / num_batches for k, v in total_losses.items()}, skipped_batches
+    config = {"use_badm": True, "use_aadm": True}
+    losses, skipped, _ = _train_epoch(model, loader, optimizer, scheduler, loss_fn, scaler, device, gradient_accumulation_steps, config)
+    return losses, skipped
 
 
-@torch.inference_mode()
 def evaluate(model, loader, device):
-    model.eval()
-    all_probs = []
-    all_labels = []
-
-    pbar = tqdm(loader, desc="Evaluating", ncols=100)
-    for batch_data in pbar:
-        if len(batch_data) == 3:
-            images, labels, extras = batch_data
-            sobel_cached = extras.get("sobel_cached").to(device, non_blocking=True) if "sobel_cached" in extras else None
-        else:
-            images, labels = batch_data
-            sobel_cached = None
-
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        outputs = model(images, freq_cached=None, sobel_cached=sobel_cached, use_badm=True, use_aadm=True)
-        probs = torch.sigmoid(outputs["logit"]).cpu().numpy()
-
-        all_probs.extend(probs.flatten().tolist())
-        all_labels.extend(labels.cpu().numpy().tolist())
-
-    auc = roc_auc_score(all_labels, all_probs)
-    preds = [1 if p > 0.5 else 0 for p in all_probs]
-    acc = accuracy_score(all_labels, preds)
-
-    return {"auc": auc, "accuracy": acc}
+    metrics = _evaluate(model, loader, device, use_badm=True, use_aadm=True)
+    return {"auc": metrics["auc"], "accuracy": metrics["accuracy"]}
 
 
 def train_model(model, train_loader, val_loader, config, device, output_dir):
@@ -273,8 +207,8 @@ def main():
     output_dir = Path(args.output_dir) / config["experiment_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config, f, indent=2)
+    with open(output_dir / "config.yaml", 'w') as f:
+        yaml.safe_dump(config, f, default_flow_style=False)
 
     print("\n" + "="*70)
     print("LOADING DATASET")

@@ -70,14 +70,15 @@ class DeepfakeDataset(Dataset):
         try:
             with open(img_path, 'rb') as f:
                 img_hash = hashlib.md5(f.read()).hexdigest()
-        except:
+        except Exception:
             img_hash = hashlib.md5(str(img_path).encode()).hexdigest()
 
-        class_name = "real" if "/real/" in str(img_path) or "\\real\\" in str(img_path) else "fake"
+        path_str = str(img_path)
+        class_name = "real" if "/real/" in path_str or "\\real\\" in path_str else "fake"
 
         domain_name = "unknown"
         for domain in ["stylegan", "cifake", "wilddeepfake", "ff_c23"]:
-            if domain in str(img_path):
+            if domain in path_str:
                 domain_name = domain
                 break
 
@@ -95,23 +96,19 @@ class DeepfakeDataset(Dataset):
             img = Image.open(self.image_paths[idx]).convert("RGB")
             img_array = np.array(img)
         except Exception as e:
-            if idx + 1 < len(self.image_paths):
-                return self.__getitem__(idx + 1)
-            img_array = np.zeros((224, 224, 3), dtype=np.uint8)
-            img = self.transform(image=img_array)["image"] if self.transform else torch.zeros(3, 224, 224)
+            raise RuntimeError(
+                f"Failed to load image at index {idx}: {self.image_paths[idx]}. "
+                f"Error: {str(e)}"
+            )
+
+        img = self.transform(image=img_array)["image"] if self.transform else torch.from_numpy(img_array).permute(2, 0, 1)
+
+        if not self.preprocess_dir:
             return img, self.labels[idx]
 
-        if self.transform is not None:
-            img = self.transform(image=img_array)["image"]
-
-        extras = {}
-        if self.preprocess_dir:
-            sobel_path = self._get_cache_path(self.image_paths[idx], "sobel")
-
-            if sobel_path is not None and sobel_path.exists():
-                extras["sobel_cached"] = torch.from_numpy(np.load(str(sobel_path)))
-
-        if extras:
-            return img, self.labels[idx], extras
-        else:
+        sobel_path = self._get_cache_path(self.image_paths[idx], "sobel")
+        if sobel_path is None or not sobel_path.exists():
             return img, self.labels[idx]
+
+        extras = {"sobel_cached": torch.from_numpy(np.load(str(sobel_path)))}
+        return img, self.labels[idx], extras

@@ -151,8 +151,16 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
 
 
 def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader,
-                config: dict, device: str, checkpoint_dir: Path):
-    loss_config = LossConfig(**{k: v for k, v in config.items() if k in LossConfig.__annotations__})
+                config: dict, device: str, checkpoint_dir: Path, loss_config: LossConfig = None):
+    if loss_config is None:
+        loss_config = LossConfig(
+            lambda_main=config.get("lambda_main", 1.0),
+            lambda_branch=config.get("lambda_branch", 0.3),
+            lambda_orthogonal=config.get("lambda_orthogonal", 0.1),
+            lambda_deep_supervision=config.get("lambda_deep_supervision", 0.05),
+            label_smoothing=config.get("label_smoothing", 0.1),
+            orthogonality_margin=config.get("orthogonality_margin", 0.1)
+        )
     loss_fn = RADARLoss(loss_config)
 
     optimizer = AdamW(model.parameters(), lr=config["learning_rate"],

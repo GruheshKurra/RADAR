@@ -6,45 +6,110 @@ import subprocess
 import sys
 import os
 import io
+import json
 from datasets import load_dataset
 from PIL import Image
 from tqdm import tqdm
 import shutil
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing as mp
+
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+from utils.logging import print_section, print_complete, print_result
 
 os.environ['HF_HOME'] = str(Path.cwd() / 'data' / 'hf_cache')
 os.environ['HF_DATASETS_CACHE'] = str(Path.cwd() / 'data' / 'hf_cache')
+
+REAL_RATIO = 0.35
+FAKE_RATIO = 0.65
+SAVE_BATCH_SIZE = 1000
+IMAGE_QUALITY = 95
+MAX_WORKERS = 2
+HEARTBEAT_INTERVAL = 500
 
 
 def save_image(args):
     img, img_path = args
     try:
         if hasattr(img, 'save'):
-            img.save(str(img_path), optimize=False, quality=95)
+            img.save(str(img_path), optimize=False, quality=IMAGE_QUALITY)
         elif isinstance(img, dict) and 'bytes' in img:
-            Image.open(io.BytesIO(img['bytes'])).save(str(img_path), optimize=False, quality=95)
+            Image.open(io.BytesIO(img['bytes'])).save(str(img_path), optimize=False, quality=IMAGE_QUALITY)
         return img_path
-    except:
+    except Exception:
         return None
 
 
+def detect_label_from_key(key: str) -> tuple[bool, bool]:
+    if not key:
+        return False, False
+
+    key_lower = key.lower().replace("\\", "/")
+    key_parts = key_lower.split("/")
+
+    for part in key_parts:
+        if part == "fake":
+            return True, False
+        if part == "real":
+            return False, True
+
+    return False, False
+
+
+def detect_label_from_field(label) -> tuple[bool, bool]:
+    if label is None:
+        return False, False
+
+    if isinstance(label, str):
+        label_lower = label.lower().strip()
+        is_fake = label_lower in ("fake", "1", "deepfake", "manipulated")
+        is_real = label_lower in ("real", "0", "original", "authentic")
+        return is_fake, is_real
+
+    if isinstance(label, (int, float)):
+        return int(label) == 1, int(label) == 0
+
+    return False, False
+
+
+def should_skip_sample(is_real: bool, is_fake: bool, total_real: int, total_fake: int,
+                       target_real: float, target_fake: float) -> bool:
+    if is_real and total_real >= target_real:
+        return True
+    if is_fake and total_fake >= target_fake:
+        return True
+    return False
+
+
+def save_progress(progress_file: Path, stats: dict, split_name: str, idx: int):
+    progress = {
+        "train_real": stats["train_real"],
+        "train_fake": stats["train_fake"],
+        "test_real": stats["test_real"],
+        "test_fake": stats["test_fake"],
+        "last_split": split_name,
+        "last_idx": idx,
+    }
+    with open(progress_file, 'w') as f:
+        json.dump(progress, f, indent=2)
+
+
+def load_progress(progress_file: Path) -> dict:
+    if not progress_file.exists():
+        return {"train_real": 0, "train_fake": 0, "test_real": 0, "test_fake": 0, "last_split": None, "last_idx": 0}
+    with open(progress_file, 'r') as f:
+        return json.load(f)
+
+
 def download_wilddeepfake(output_dir: Path, max_images: int = None):
-    print("\n" + "="*70)
-    print("[1/3] DOWNLOADING WILDDEEPFAKE FROM HUGGINGFACE")
-    print("="*70)
-    if max_images:
-        print(f"Dataset: Limited to {max_images:,} images (memory-efficient mode)")
-    else:
-        print("Dataset: ~1.16M images (994k train + 165k test)")
-    print("Size: Varies based on limit")
-    print("="*70)
+    limit_msg = f"Limited to {max_images:,} images (pod-safe mode)" if max_images else "~1.16M images (994k train + 165k test)"
+    print_section(
+        "[1/3] DOWNLOADING WILDDEEPFAKE FROM HUGGINGFACE",
+        f"Dataset: {limit_msg}\nSize: Varies based on limit"
+    )
 
     try:
-        num_proc = max(1, mp.cpu_count() - 2)
-        print(f"\nLoading dataset with {num_proc} processes...")
-        print("This may take several minutes for large datasets...\n")
-        ds = load_dataset("xingjunm/WildDeepfake", num_proc=num_proc, streaming=False)
+        print(f"\nLoading dataset (streaming mode for pod safety)...")
+        print("This prevents memory spikes and freeze issues...\n")
+        ds = load_dataset("xingjunm/WildDeepfake", streaming=True)
 
         wild_dir = output_dir / "wilddeepfake"
         real_dir = wild_dir / "real"
@@ -52,23 +117,33 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
         real_dir.mkdir(parents=True, exist_ok=True)
         fake_dir.mkdir(parents=True, exist_ok=True)
 
-        print("\n" + "="*70)
-        print("[2/3] STREAMING DATASET PROCESSING (BALANCED SAMPLING)")
-        print("="*70)
-        if max_images:
-            print(f"Target: {max_images:,} images with balanced real/fake ratio")
-        print("="*70)
+        progress_file = wild_dir / "progress.json"
+        progress = load_progress(progress_file)
 
-        stats = {"train_real": 0, "train_fake": 0, "test_real": 0, "test_fake": 0}
-        total_saved = 0
+        body_lines = []
+        if max_images:
+            body_lines.append(f"Target: {max_images:,} images with balanced real/fake ratio")
+        if progress["last_split"]:
+            body_lines.append(f"Resuming from: {progress['last_split']} index {progress['last_idx']}")
+
+        print_section("[2/3] STREAMING DATASET PROCESSING (BALANCED SAMPLING)", "\n".join(body_lines))
+
+        stats = {
+            "train_real": progress["train_real"],
+            "train_fake": progress["train_fake"],
+            "test_real": progress["test_real"],
+            "test_fake": progress["test_fake"]
+        }
+        total_saved = sum(stats.values())
         save_batch = []
-        batch_size = 1000
 
         debug_printed = False
         for split_name in ["train", "test"]:
+            if progress["last_split"] and split_name < progress["last_split"]:
+                continue
+
             if split_name in ds:
-                split_size = len(ds[split_name])
-                print(f"\nProcessing {split_name} split ({split_size:,} images)...")
+                print(f"\nProcessing {split_name} split...")
 
                 if not debug_printed:
                     try:
@@ -79,61 +154,44 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                             if k not in ["png", "image", "img"]:
                                 print(f"    {k}: {repr(v)[:100]}")
                         debug_printed = True
-                    except:
+                    except Exception:
                         pass
 
                 if max_images and total_saved >= max_images:
                     print(f"Reached limit of {max_images:,} images, stopping.")
                     break
 
-                target_real = int(max_images * 0.35) if max_images else float('inf')
-                target_fake = int(max_images * 0.65) if max_images else float('inf')
+                target_real = int(max_images * REAL_RATIO) if max_images else float('inf')
+                target_fake = int(max_images * FAKE_RATIO) if max_images else float('inf')
                 total_real = stats["train_real"] + stats["test_real"]
                 total_fake = stats["train_fake"] + stats["test_fake"]
 
-                pbar = tqdm(total=min(split_size, max_images - total_saved if max_images else split_size),
-                           desc=f"  Saving {split_name}", unit="img")
+                pbar = tqdm(desc=f"  Saving {split_name}", unit="img")
 
                 for idx, sample in enumerate(ds[split_name]):
+                    if progress["last_split"] == split_name and idx <= progress["last_idx"]:
+                        continue
+
+                    if idx % HEARTBEAT_INTERVAL == 0:
+                        print(f"Heartbeat: split={split_name}, idx={idx}, saved={total_saved}")
+
                     if max_images and total_saved >= max_images:
                         break
 
                     try:
                         img = sample.get("png") or sample.get("image") or sample.get("img")
 
-                        is_fake = False
-                        is_real = False
-
-                        key = sample.get("__key__", "")
-                        if key:
-                            key_lower = key.lower()
-                            key_parts = key_lower.replace("\\", "/").split("/")
-                            for part in key_parts:
-                                if part == "fake":
-                                    is_fake = True
-                                    break
-                                elif part == "real":
-                                    is_real = True
-                                    break
+                        is_fake, is_real = detect_label_from_key(sample.get("__key__", ""))
 
                         if not is_fake and not is_real:
                             label = sample.get("label", sample.get("cls", sample.get("class", None)))
-                            if label is not None:
-                                if isinstance(label, str):
-                                    label_lower = label.lower().strip()
-                                    is_fake = label_lower in ("fake", "1", "deepfake", "manipulated")
-                                    is_real = label_lower in ("real", "0", "original", "authentic")
-                                elif isinstance(label, (int, float)):
-                                    is_fake = int(label) == 1
-                                    is_real = int(label) == 0
+                            is_fake, is_real = detect_label_from_field(label)
 
                         if img is not None and (is_fake or is_real):
                             total_real = stats["train_real"] + stats["test_real"]
                             total_fake = stats["train_fake"] + stats["test_fake"]
 
-                            if is_real and total_real >= target_real:
-                                continue
-                            if is_fake and total_fake >= target_fake:
+                            if should_skip_sample(is_real, is_fake, total_real, total_fake, target_real, target_fake):
                                 continue
 
                             target_dir = real_dir if is_real else fake_dir
@@ -145,29 +203,30 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                             else:
                                 stats[f"{split_name}_fake"] += 1
 
-                            if len(save_batch) >= batch_size:
-                                max_workers = min(16, mp.cpu_count())
-                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                    results = list(executor.map(save_image, save_batch))
-                                successful = sum(1 for r in results if r is not None)
-                                total_saved += successful
-                                pbar.update(successful)
+                            if len(save_batch) >= SAVE_BATCH_SIZE:
+                                for img, img_path in save_batch:
+                                    result = save_image((img, img_path))
+                                    if result is not None:
+                                        total_saved += 1
+                                        pbar.update(1)
+
+                                save_progress(progress_file, stats, split_name, idx)
                                 save_batch = []
 
                                 total_real = stats["train_real"] + stats["test_real"]
                                 total_fake = stats["train_fake"] + stats["test_fake"]
                                 if max_images and (total_real >= target_real and total_fake >= target_fake):
                                     break
-                    except:
+                    except Exception:
                         continue
 
                 if save_batch:
-                    max_workers = min(16, mp.cpu_count())
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        results = list(executor.map(save_image, save_batch))
-                    successful = sum(1 for r in results if r is not None)
-                    total_saved += successful
-                    pbar.update(successful)
+                    for img, img_path in save_batch:
+                        result = save_image((img, img_path))
+                        if result is not None:
+                            total_saved += 1
+                            pbar.update(1)
+                    save_progress(progress_file, stats, split_name, idx)
                     save_batch = []
 
                 pbar.close()
@@ -175,18 +234,18 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
         real_count = len(list(real_dir.glob('*.jpg')))
         fake_count = len(list(fake_dir.glob('*.jpg')))
 
-        print("\n" + "="*70)
-        print("✓ WILDDEEPFAKE DOWNLOAD COMPLETE!")
-        print("="*70)
-        print(f"Location: {wild_dir}")
-        print(f"Real images: {real_count:,}")
-        print(f"Fake images: {fake_count:,}")
-        print(f"Total: {real_count + fake_count:,}")
+        summary = {
+            "Location": str(wild_dir),
+            "Real images": real_count,
+            "Fake images": fake_count,
+            "Total": real_count + fake_count,
+            "Train": f"{stats['train_real']:,} real + {stats['train_fake']:,} fake",
+            "Test": f"{stats['test_real']:,} real + {stats['test_fake']:,} fake",
+        }
         if max_images:
-            print(f"Requested limit: {max_images:,}")
-        print(f"Train: {stats['train_real']:,} real + {stats['train_fake']:,} fake")
-        print(f"Test:  {stats['test_real']:,} real + {stats['test_fake']:,} fake")
-        print("="*70 + "\n")
+            summary["Requested limit"] = max_images
+
+        print_complete("WILDDEEPFAKE DOWNLOAD COMPLETE", summary)
 
         return True
 
@@ -198,9 +257,7 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
 
 
 def check_dataset_status(output_dir: Path):
-    print("\n" + "="*70)
-    print("DATASET STATUS CHECK")
-    print("="*70)
+    print_section("DATASET STATUS CHECK")
 
     wild_dir = output_dir / "wilddeepfake"
 
@@ -211,18 +268,14 @@ def check_dataset_status(output_dir: Path):
         total = real_count + fake_count
 
         if total > 0:
-            print(f"  Real images: {real_count:,}")
-            print(f"  Fake images: {fake_count:,}")
-            print(f"  Total: {total:,}")
-            print("="*70 + "\n")
+            print_result({"Real images": real_count, "Fake images": fake_count, "Total": total}, "  ")
+            print()
             return True
         else:
-            print("  ✗ Folder exists but empty")
-            print("="*70 + "\n")
+            print("  ✗ Folder exists but empty\n")
             return False
     else:
-        print(f"\n✗ WildDeepfake not found")
-        print("="*70 + "\n")
+        print(f"\n✗ WildDeepfake not found\n")
         return False
 
 
@@ -237,12 +290,10 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n" + "="*70)
-    print("RADAR DATASET PREPARATION (MEMORY-EFFICIENT MODE)")
-    print("="*70)
-    print(f"Output directory: {output_dir.absolute()}")
-    print(f"Max images: {args.max_images:,} (prevents memory overflow)")
-    print("="*70)
+    print_section(
+        "RADAR DATASET PREPARATION (MEMORY-EFFICIENT MODE)",
+        f"Output directory: {output_dir.absolute()}\nMax images: {args.max_images:,} (prevents memory overflow)"
+    )
 
     if args.check_only:
         exists = check_dataset_status(output_dir)
@@ -257,12 +308,10 @@ def main():
 
     if success:
         check_dataset_status(output_dir)
-        print("\n" + "="*70)
-        print("✓ DATASET PREPARATION COMPLETE!")
-        print("="*70)
-        print("\nNext step:")
-        print("  python 2_train_model.py --data_dir ./data --output_dir ./outputs")
-        print("="*70 + "\n")
+        print_complete(
+            "DATASET PREPARATION COMPLETE",
+            {"Next step": "python 2_train_model.py --data_dir ./data --output_dir ./outputs"}
+        )
         sys.exit(0)
     else:
         sys.exit(1)
