@@ -53,7 +53,10 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
         fake_dir.mkdir(parents=True, exist_ok=True)
 
         print("\n" + "="*70)
-        print("[2/3] STREAMING DATASET PROCESSING (MEMORY-EFFICIENT)")
+        print("[2/3] STREAMING DATASET PROCESSING (BALANCED SAMPLING)")
+        print("="*70)
+        if max_images:
+            print(f"Target: {max_images:,} images with balanced real/fake ratio")
         print("="*70)
 
         stats = {"train_real": 0, "train_fake": 0, "test_real": 0, "test_fake": 0}
@@ -69,6 +72,11 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                 if max_images and total_saved >= max_images:
                     print(f"Reached limit of {max_images:,} images, stopping.")
                     break
+
+                target_real = int(max_images * 0.35) if max_images else float('inf')
+                target_fake = int(max_images * 0.65) if max_images else float('inf')
+                total_real = stats["train_real"] + stats["test_real"]
+                total_fake = stats["train_fake"] + stats["test_fake"]
 
                 pbar = tqdm(total=min(split_size, max_images - total_saved if max_images else split_size),
                            desc=f"  Saving {split_name}", unit="img")
@@ -94,6 +102,14 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                                 is_real = label == 0
 
                         if img is not None and (is_fake or is_real):
+                            total_real = stats["train_real"] + stats["test_real"]
+                            total_fake = stats["train_fake"] + stats["test_fake"]
+
+                            if is_real and total_real >= target_real:
+                                continue
+                            if is_fake and total_fake >= target_fake:
+                                continue
+
                             target_dir = real_dir if is_real else fake_dir
                             img_path = target_dir / f"{split_name}_{idx:07d}.jpg"
                             save_batch.append((img, img_path))
@@ -112,7 +128,9 @@ def download_wilddeepfake(output_dir: Path, max_images: int = None):
                                 pbar.update(successful)
                                 save_batch = []
 
-                                if max_images and total_saved >= max_images:
+                                total_real = stats["train_real"] + stats["test_real"]
+                                total_fake = stats["train_fake"] + stats["test_fake"]
+                                if max_images and (total_real >= target_real and total_fake >= target_fake):
                                     break
                     except:
                         continue

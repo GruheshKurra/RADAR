@@ -1,9 +1,34 @@
-# RunPod Quick Start Guide (Memory-Efficient)
+# RunPod Quick Start Guide (Memory-Efficient + Balanced)
 
-## 🚨 CRITICAL FIX - Memory Overflow Solved
+## 🚨 CRITICAL FIXES
 
-**Previous Issue**: Pod crashed at ~18% due to loading all 1.4M images into RAM
+**Issue 1 - Memory Overflow**: Pod crashed at ~18% due to loading all 1.4M images into RAM
 **Solution**: Stream processing with configurable limits (default: 300k images)
+
+**Issue 2 - Unbalanced Dataset**: Downloaded 230k fake images, 0 real images
+**Solution**: Balanced sampling (35% real, 65% fake) to match dataset distribution
+
+---
+
+## 🔧 If You Already Have 230k Fake Images (0 Real)
+
+**Your current situation**: Dataset has 230,000 fake, 0 real images
+
+**Fix it**:
+```bash
+cd /workspace/RADAR-Clean
+
+# Pull the latest fixes
+git pull
+
+# Delete the unbalanced dataset
+rm -rf data/wilddeepfake
+
+# Re-download with balanced sampling
+python3 1_prepare_dataset.py --output_dir ./data --max_images 230000 --force
+```
+
+This will now download **~80k real + ~150k fake** (balanced 35/65 ratio).
 
 ---
 
@@ -44,6 +69,18 @@ python3 2_train_model.py --data_dir ./data --output_dir ./outputs
 - Saves as it goes (not after loading all)
 - Configurable limit with `--max_images`
 - Default: 300k images (safe for A40)
+
+### ✅ Balanced Sampling
+
+**Before (BROKEN)**:
+- Downloaded images sequentially until limit
+- Result: 230k fake, 0 real (all fakes came first)
+- Training failed: "Insufficient samples"
+
+**After (FIXED)**:
+- Maintains 35/65 real/fake ratio
+- If max_images=230k → ~80k real + ~150k fake
+- Training works correctly
 
 ### ✅ Key Parameters
 
