@@ -10,11 +10,12 @@ from datasets import load_dataset
 from PIL import Image
 from tqdm import tqdm
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing as mp
 
 os.environ['HF_HOME'] = str(Path.cwd() / 'data' / 'hf_cache')
 os.environ['HF_DATASETS_CACHE'] = str(Path.cwd() / 'data' / 'hf_cache')
+
 
 def save_image(args):
     img, img_path = args
@@ -26,6 +27,7 @@ def save_image(args):
         return img_path
     except:
         return None
+
 
 def download_wilddeepfake(output_dir: Path):
     print("\n" + "="*70)
@@ -61,15 +63,12 @@ def download_wilddeepfake(output_dir: Path):
 
                 for idx, sample in enumerate(tqdm(ds[split_name], desc=f"  Organizing {split_name}", unit="img")):
                     try:
-                        # WildDeepfake uses 'png' column for images
                         img = sample.get("png") or sample.get("image") or sample.get("img")
 
-                        # Extract label from __key__ path (e.g., "./1/fake/131/1057" or "./1/real/131/1057")
                         key = sample.get("__key__", "")
                         is_fake = "fake" in key.lower()
                         is_real = "real" in key.lower()
 
-                        # Fallback to explicit label if available
                         if not is_fake and not is_real:
                             label = sample.get("label", "")
                             if isinstance(label, str):
@@ -84,12 +83,11 @@ def download_wilddeepfake(output_dir: Path):
                             img_path = target_dir / f"{split_name}_{idx:07d}.jpg"
                             save_tasks.append((img, img_path))
 
-                            # Track statistics
                             if is_real:
                                 stats[f"{split_name}_real"] += 1
                             else:
                                 stats[f"{split_name}_fake"] += 1
-                    except Exception as e:
+                    except:
                         continue
 
         print("\n" + "="*70)
@@ -126,56 +124,13 @@ def download_wilddeepfake(output_dir: Path):
         print(f"Success rate: {successful}/{len(save_tasks)} ({100*successful/len(save_tasks):.1f}%)")
         print("="*70 + "\n")
 
+        return True
+
     except Exception as e:
         print(f"\n✗ Error downloading WildDeepfake: {e}")
         import traceback
         traceback.print_exc()
-
-
-def download_faceforensics(output_dir: Path, workspace_root: Path = None):
-    print("\n[2] Downloading FaceForensics++ from Kaggle...")
-
-    if workspace_root is None:
-        workspace_root = Path("/workspace") if Path("/workspace").exists() else Path.cwd()
-
-    ff_zip = workspace_root / "ff-c23.zip"
-    ff_dir = workspace_root / "ff-c23"
-
-    if not ff_zip.exists() and not ff_dir.exists():
-        print("Downloading FF-c23 from Kaggle (this will take several minutes)...")
-        try:
-            subprocess.run([
-                "curl", "-L", "-o", str(ff_zip),
-                "https://www.kaggle.com/api/v1/datasets/download/xdxd003/ff-c23"
-            ], check=True)
-            print(f"✓ Downloaded to {ff_zip}")
-        except subprocess.CalledProcessError:
-            print("✗ Failed to download FF-c23. Continuing without it...")
-            return
-
-    if ff_zip.exists() and not ff_dir.exists():
-        print("Unzipping FaceForensics++ (this may take several minutes)...")
-        ff_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run(["unzip", "-q", str(ff_zip), "-d", str(ff_dir)], check=True)
-            print(f"✓ Extracted to {ff_dir}")
-        except subprocess.CalledProcessError:
-            print("✗ Failed to extract FF-c23")
-            return
-
-    if ff_dir.exists():
-        print("Extracting frames from videos...")
-        from extract_frames import extract_ff_dataset
-        num_workers = max(1, mp.cpu_count())
-        extract_ff_dataset(ff_dir, output_dir, num_frames=10, num_workers=num_workers)
-
-        print("\nCleaning up to save space...")
-        if ff_zip.exists():
-            ff_zip.unlink()
-            print(f"✓ Removed {ff_zip}")
-        if ff_dir.exists():
-            shutil.rmtree(ff_dir)
-            print(f"✓ Removed {ff_dir}")
+        return False
 
 
 def check_dataset_status(output_dir: Path):
@@ -183,95 +138,67 @@ def check_dataset_status(output_dir: Path):
     print("DATASET STATUS CHECK")
     print("="*70)
 
-    datasets = {
-        "wilddeepfake": "WildDeepfake",
-    }
+    wild_dir = output_dir / "wilddeepfake"
 
-    total_images = 0
-    for folder_name, display_name in datasets.items():
-        dataset_path = output_dir / folder_name
-        if dataset_path.exists():
-            print(f"\nChecking {display_name}...")
-            real_count = len(list((dataset_path / "real").glob("*.jpg"))) if (dataset_path / "real").exists() else 0
-            fake_count = len(list((dataset_path / "fake").glob("*.jpg"))) if (dataset_path / "fake").exists() else 0
-            total = real_count + fake_count
-            total_images += total
+    if wild_dir.exists():
+        print(f"\n✓ WildDeepfake found at: {wild_dir}")
+        real_count = len(list((wild_dir / "real").glob("*.jpg"))) if (wild_dir / "real").exists() else 0
+        fake_count = len(list((wild_dir / "fake").glob("*.jpg"))) if (wild_dir / "fake").exists() else 0
+        total = real_count + fake_count
 
-            if total > 0:
-                print(f"  ✓ Status: Ready")
-                print(f"  ✓ Location: {dataset_path}")
-                print(f"  ✓ Real images: {real_count:,}")
-                print(f"  ✓ Fake images: {fake_count:,}")
-                print(f"  ✓ Total: {total:,}")
-            else:
-                print(f"  ○ Status: Folder exists but empty")
+        if total > 0:
+            print(f"  Real images: {real_count:,}")
+            print(f"  Fake images: {fake_count:,}")
+            print(f"  Total: {total:,}")
+            print("="*70 + "\n")
+            return True
         else:
-            print(f"\n{display_name}:")
-            print(f"  ✗ Status: Not found")
-            print(f"  ⓘ Run: python src/data/download_datasets.py --datasets wilddeepfake")
-
-    print("\n" + "="*70)
-    if total_images > 0:
-        print(f"Total images available: {total_images:,}")
-    print("="*70 + "\n")
+            print("  ✗ Folder exists but empty")
+            print("="*70 + "\n")
+            return False
+    else:
+        print(f"\n✗ WildDeepfake not found")
+        print("="*70 + "\n")
+        return False
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Download and prepare datasets for RADAR"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./data",
-        help="Output directory for datasets (default: ./data)"
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        choices=["wilddeepfake", "faceforensics", "all", "check"],
-        default=["wilddeepfake"],
-        help="Which datasets to download (default: wilddeepfake)"
-    )
-    parser.add_argument(
-        "--workspace_root",
-        type=str,
-        default=None,
-        help="Workspace root for temporary downloads"
-    )
-
+    parser = argparse.ArgumentParser(description="Prepare WildDeepfake dataset for RADAR training")
+    parser.add_argument("--output_dir", type=str, default="./data", help="Output directory for datasets")
+    parser.add_argument("--check_only", action="store_true", help="Only check dataset status without downloading")
     args = parser.parse_args()
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    workspace_root = Path(args.workspace_root) if args.workspace_root else None
-
-    if "check" in args.datasets:
-        check_dataset_status(output_dir)
-        return
-
     print("\n" + "="*70)
-    print("RADAR DATASET DOWNLOAD")
+    print("RADAR DATASET PREPARATION")
     print("="*70)
     print(f"Output directory: {output_dir.absolute()}")
     print("="*70)
 
-    if "all" in args.datasets or "wilddeepfake" in args.datasets:
-        download_wilddeepfake(output_dir)
+    if args.check_only:
+        exists = check_dataset_status(output_dir)
+        sys.exit(0 if exists else 1)
 
-    if "all" in args.datasets or "faceforensics" in args.datasets:
-        download_faceforensics(output_dir, workspace_root)
+    existing = check_dataset_status(output_dir)
+    if existing:
+        print("Dataset already exists. Use --force to re-download.\n")
+        sys.exit(0)
 
-    check_dataset_status(output_dir)
+    success = download_wilddeepfake(output_dir)
 
-    print("\n" + "="*70)
-    print("✓ DATASET PREPARATION COMPLETE!")
-    print("="*70)
-    print(f"Data directory: {output_dir.absolute()}")
-    print("\nNext steps:")
-    print("  cd src/experiments")
-    print("  python run.py --config configs/wilddeepfake.yaml --output ../../outputs")
-    print("="*70 + "\n")
+    if success:
+        check_dataset_status(output_dir)
+        print("\n" + "="*70)
+        print("✓ DATASET PREPARATION COMPLETE!")
+        print("="*70)
+        print("\nNext step:")
+        print("  python 2_train_model.py --data_dir ./data --output_dir ./outputs")
+        print("="*70 + "\n")
+        sys.exit(0)
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

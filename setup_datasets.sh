@@ -25,8 +25,8 @@ echo "[1/3] Installing dependencies..."
 pip install -q datasets huggingface_hub Pillow tqdm opencv-python
 
 echo ""
-echo "[2/3] Downloading datasets..."
-python3 src/data/download_datasets.py --datasets all --output_dir ./data --workspace_root .
+echo "[2/3] Downloading WildDeepfake dataset..."
+python3 src/data/download_datasets.py --datasets wilddeepfake --output_dir ./data --workspace_root .
 
 echo ""
 echo "[3/3] Final dataset status:"
