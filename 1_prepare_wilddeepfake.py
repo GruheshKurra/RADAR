@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+DEPRECATED: Use FaceForensics++ instead (0_download_faceforensics.py)
+
+This script is kept for reference only. WildDeepfake has labeling issues.
+For research, use FaceForensics++ which is the standard benchmark.
+"""
 
 import argparse
 from pathlib import Path
