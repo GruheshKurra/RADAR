@@ -1,6 +1,6 @@
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 def load_domain_data(data_dir: Path, domain: str) -> Tuple[List[Path], List[int]]:
@@ -80,3 +80,34 @@ def create_stratified_split(
     test_labels = [labels[i] for i in test_idx]
 
     return train_images, train_labels, val_images, val_labels, test_images, test_labels
+
+
+def load_presplit_data(data_dir: Path, split: str) -> Tuple[List[Path], List[int]]:
+    """Load data from pre-split directories (e.g., FaceForensics++)."""
+    split_path = data_dir / split
+
+    if not split_path.exists():
+        raise ValueError(f"Split directory does not exist: {split_path}")
+
+    images, labels = [], []
+
+    for class_name, label in [("real", 0), ("fake", 1)]:
+        class_dir = split_path / class_name
+        if not class_dir.exists():
+            continue
+
+        for ext in ["*.jpg", "*.png", "*.jpeg"]:
+            for img_path in class_dir.glob(ext):
+                images.append(img_path)
+                labels.append(label)
+
+    if len(images) == 0:
+        raise ValueError(f"No images found in {split_path}")
+
+    return images, labels
+
+
+def is_presplit_dataset(data_dir: Path) -> bool:
+    """Check if dataset has pre-split structure (train/val/test folders)."""
+    has_splits = (data_dir / "train").exists() and (data_dir / "val").exists()
+    return has_splits

@@ -23,7 +23,7 @@ os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent / 'data' / 'torch_cache
 
 from method import RADAR, RADARConfig, RADARLoss, LossConfig
 from data.dataset import DeepfakeDataset, get_train_transforms, get_val_transforms
-from data.splits import load_domain_data, create_stratified_split
+from data.splits import load_domain_data, create_stratified_split, load_presplit_data, is_presplit_dataset
 from experiments.train import train_epoch as _train_epoch, evaluate as _evaluate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
@@ -206,11 +206,22 @@ def main():
     print("="*70)
 
     data_dir = Path(config["data_dir"])
-    images, labels = load_domain_data(data_dir, config["source_domain"])
 
-    train_images, train_labels, val_images, val_labels, test_images, test_labels = create_stratified_split(
-        images, labels, config["train_ratio"], config["val_ratio"], config["seed"]
-    )
+    if is_presplit_dataset(data_dir):
+        print(f"Detected pre-split dataset structure")
+        train_images, train_labels = load_presplit_data(data_dir, "train")
+        val_images, val_labels = load_presplit_data(data_dir, "val")
+
+        if (data_dir / "test").exists():
+            test_images, test_labels = load_presplit_data(data_dir, "test")
+        else:
+            test_images, test_labels = val_images, val_labels
+    else:
+        print(f"Using single-domain structure with stratified split")
+        images, labels = load_domain_data(data_dir, config["source_domain"])
+        train_images, train_labels, val_images, val_labels, test_images, test_labels = create_stratified_split(
+            images, labels, config["train_ratio"], config["val_ratio"], config["seed"]
+        )
 
     print(f"Train samples: {len(train_images):,}")
     print(f"Val samples: {len(val_images):,}")

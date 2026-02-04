@@ -23,7 +23,7 @@ os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent / 'data' / 'torch_cache
 
 from method import RADAR, RADARConfig, RADARLoss, LossConfig
 from data.dataset import DeepfakeDataset, get_train_transforms, get_val_transforms
-from data.splits import load_domain_data, create_stratified_split
+from data.splits import load_domain_data, create_stratified_split, load_presplit_data, is_presplit_dataset
 from experiments.train import train_epoch as _train_epoch, evaluate as _evaluate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
@@ -215,24 +215,52 @@ def main():
     print("="*70)
 
     data_dir = Path(config["data_dir"])
-    images, labels = load_domain_data(data_dir, config["source_domain"])
 
-    total_images = len(images)
-    subset_size = int(total_images * config["subset_ratio"])
+    if is_presplit_dataset(data_dir):
+        print(f"Detected pre-split dataset structure")
+        train_images, train_labels = load_presplit_data(data_dir, "train")
+        val_images, val_labels = load_presplit_data(data_dir, "val")
 
-    indices = list(range(total_images))
-    random.Random(config["seed"]).shuffle(indices)
-    subset_indices = indices[:subset_size]
+        if (data_dir / "test").exists():
+            test_images, test_labels = load_presplit_data(data_dir, "test")
+        else:
+            test_images, test_labels = val_images, val_labels
 
-    images_subset = [images[i] for i in subset_indices]
-    labels_subset = [labels[i] for i in subset_indices]
+        total_images = len(train_images) + len(val_images)
+        subset_size = int(total_images * config["subset_ratio"])
 
-    print(f"Total dataset: {total_images:,} images")
-    print(f"Using subset: {len(images_subset):,} images ({config['subset_ratio']*100:.0f}%)")
+        if config["subset_ratio"] < 1.0:
+            indices = list(range(len(train_images)))
+            random.Random(config["seed"]).shuffle(indices)
+            train_subset_size = int(len(train_images) * config["subset_ratio"])
+            train_images = [train_images[i] for i in indices[:train_subset_size]]
+            train_labels = [train_labels[i] for i in indices[:train_subset_size]]
 
-    train_images, train_labels, val_images, val_labels, test_images, test_labels = create_stratified_split(
-        images_subset, labels_subset, config["train_ratio"], config["val_ratio"], config["seed"]
-    )
+            val_subset_size = int(len(val_images) * config["subset_ratio"])
+            val_images = val_images[:val_subset_size]
+            val_labels = val_labels[:val_subset_size]
+
+            print(f"Using subset: train={len(train_images):,}, val={len(val_images):,}")
+    else:
+        print(f"Using single-domain structure with stratified split")
+        images, labels = load_domain_data(data_dir, config["source_domain"])
+
+        total_images = len(images)
+        subset_size = int(total_images * config["subset_ratio"])
+
+        indices = list(range(total_images))
+        random.Random(config["seed"]).shuffle(indices)
+        subset_indices = indices[:subset_size]
+
+        images_subset = [images[i] for i in subset_indices]
+        labels_subset = [labels[i] for i in subset_indices]
+
+        print(f"Total dataset: {total_images:,} images")
+        print(f"Using subset: {len(images_subset):,} images ({config['subset_ratio']*100:.0f}%)")
+
+        train_images, train_labels, val_images, val_labels, test_images, test_labels = create_stratified_split(
+            images_subset, labels_subset, config["train_ratio"], config["val_ratio"], config["seed"]
+        )
 
     print(f"Train samples: {len(train_images):,}")
     print(f"Val samples: {len(val_images):,}")
