@@ -9,7 +9,13 @@ import time
 import json
 from typing import Dict, Tuple
 import sys
+import os
+
 sys.path.append(str(Path(__file__).parent.parent))
+
+os.environ['TORCH_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache')
+os.environ['HF_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'hf_cache')
+os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache' / 'hub')
 
 from method import RADAR, RADARConfig, RADARLoss
 from method.loss import LossConfig
@@ -31,17 +37,17 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
     for batch_idx, batch_data in enumerate(loader):
         if len(batch_data) == 3:
             images, labels, extras = batch_data
-            freq_cached = extras.get("freq_cached").to(device, non_blocking=True) if "freq_cached" in extras else None
+            # Note: freq_cached is no longer used (on-the-fly only)
             sobel_cached = extras.get("sobel_cached").to(device, non_blocking=True) if "sobel_cached" in extras else None
         else:
             images, labels = batch_data
-            freq_cached = sobel_cached = None
+            sobel_cached = None
 
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
         with autocast(device_type=device, enabled=(device=="cuda")):
-            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached,
+            outputs = model(images, freq_cached=None, sobel_cached=sobel_cached,
                            use_badm=config.get("use_badm", True),
                            use_aadm=config.get("use_aadm", True))
             losses = loss_fn(outputs, labels,
@@ -81,42 +87,66 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
 @torch.inference_mode()
 def evaluate(model: nn.Module, loader: DataLoader, device: str,
             use_badm: bool = True, use_aadm: bool = True) -> Dict:
+    """
+    Evaluate model on a data loader.
+
+    Returns metrics for:
+        - Final prediction (gated fusion)
+        - Reasoning-only prediction (for ablation analysis)
+        - Gating alpha value
+        - Convergence delta
+    """
     all_probs = []
+    all_reasoning_probs = []  # For reasoning-only ablation
     all_labels = []
     all_convergence_deltas = []
+    all_gating_alphas = []
 
     for batch_data in loader:
         if len(batch_data) == 3:
             images, labels, extras = batch_data
-            freq_cached = extras.get("freq_cached").to(device) if "freq_cached" in extras else None
+            # Note: freq_cached is no longer used (on-the-fly only)
             sobel_cached = extras.get("sobel_cached").to(device) if "sobel_cached" in extras else None
         else:
             images, labels = batch_data
-            freq_cached = sobel_cached = None
+            sobel_cached = None
 
         images = images.to(device)
 
         with autocast(device_type=device, enabled=(device=="cuda")):
-            outputs = model(images, freq_cached=freq_cached, sobel_cached=sobel_cached,
+            outputs = model(images, freq_cached=None, sobel_cached=sobel_cached,
                            use_badm=use_badm, use_aadm=use_aadm)
 
         all_probs.append(outputs["prob"].cpu())
+        all_reasoning_probs.append(outputs["reasoning_prob"].cpu())
         all_labels.append(labels)
         all_convergence_deltas.append(outputs["convergence_delta"].cpu())
+        all_gating_alphas.append(outputs["gating_alpha"].cpu())
 
     all_probs = torch.cat(all_probs, dim=0).numpy()
+    all_reasoning_probs = torch.cat(all_reasoning_probs, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
     all_preds = (all_probs > 0.5).astype(int)
-    all_convergence_deltas = torch.cat(all_convergence_deltas, dim=0).mean().item()
+    all_reasoning_preds = (all_reasoning_probs > 0.5).astype(int)
+    avg_convergence_delta = torch.cat(all_convergence_deltas, dim=0).mean().item()
+    avg_gating_alpha = torch.cat(all_gating_alphas, dim=0).mean().item()
 
     from sklearn.metrics import accuracy_score, roc_auc_score
 
     return {
+        # Main metrics (gated fusion)
         "accuracy": accuracy_score(all_labels, all_preds),
         "auc": roc_auc_score(all_labels, all_probs),
+        # Reasoning-only metrics (for ablation - Issue 3)
+        "reasoning_accuracy": accuracy_score(all_labels, all_reasoning_preds),
+        "reasoning_auc": roc_auc_score(all_labels, all_reasoning_probs),
+        # Interpretability
+        "gating_alpha": avg_gating_alpha,
+        "convergence_delta": avg_convergence_delta,
+        # Raw data
         "probs": all_probs,
+        "reasoning_probs": all_reasoning_probs,
         "labels": all_labels,
-        "convergence_delta": all_convergence_deltas,
     }
 
 
@@ -138,7 +168,8 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
     patience_counter = 0
     early_stopping_patience = config.get("early_stopping_patience", 10)
 
-    history = {"train_loss": [], "val_auc": [], "val_acc": [], "val_convergence_delta": []}
+    history = {"train_loss": [], "val_auc": [], "val_acc": [], "val_convergence_delta": [],
+               "val_reasoning_auc": [], "val_gating_alpha": []}
 
     for epoch in range(config["num_epochs"]):
         epoch_start = time.time()
@@ -153,11 +184,15 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
         history["val_auc"].append(val_metrics["auc"])
         history["val_acc"].append(val_metrics["accuracy"])
         history["val_convergence_delta"].append(val_metrics["convergence_delta"])
+        history["val_reasoning_auc"].append(val_metrics["reasoning_auc"])
+        history["val_gating_alpha"].append(val_metrics["gating_alpha"])
 
         print(f"Epoch {epoch+1}/{config['num_epochs']}: "
               f"Loss={train_losses['total']:.4f}, AUC={val_metrics['auc']:.4f}, "
-              f"Acc={val_metrics['accuracy']:.4f}, ConvDelta={val_metrics['convergence_delta']:.4f}, "
-              f"GradNorm={grad_norm:.4f}, Time={time.time()-epoch_start:.1f}s")
+              f"ReasoningAUC={val_metrics['reasoning_auc']:.4f}, "
+              f"α={val_metrics['gating_alpha']:.3f}, "
+              f"ConvDelta={val_metrics['convergence_delta']:.4f}, "
+              f"Time={time.time()-epoch_start:.1f}s")
 
         if skipped > 0:
             print(f"  Skipped {skipped} batches with non-finite loss")

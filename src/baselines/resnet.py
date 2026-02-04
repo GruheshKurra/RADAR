@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from typing import Dict, Optional
+import os
+from pathlib import Path
+
+os.environ['TORCH_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache')
 
 
 class ResNetBaseline(nn.Module):

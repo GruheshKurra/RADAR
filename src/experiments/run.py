@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 import argparse
 import sys
+import os
+
 sys.path.append(str(Path(__file__).parent.parent))
+
+os.environ['TORCH_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache')
+os.environ['HF_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'hf_cache')
+os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache' / 'hub')
 
 from method import RADAR, RADARConfig
 from data.dataset import DeepfakeDataset, get_train_transforms, get_val_transforms
@@ -112,15 +118,21 @@ def main():
                            use_badm=config.get("use_badm", True),
                            use_aadm=config.get("use_aadm", True))
     print(f"\nTest Set Results:")
-    print(f"AUC: {test_metrics['auc']:.4f}")
+    print(f"AUC (gated): {test_metrics['auc']:.4f}")
+    print(f"AUC (reasoning-only): {test_metrics['reasoning_auc']:.4f}")
     print(f"Accuracy: {test_metrics['accuracy']:.4f}")
+    print(f"Gating α: {test_metrics['gating_alpha']:.4f}")
 
     results = {
         "history": history,
         "best_val_auc": best_auc,
         "test_metrics": {
             "auc": float(test_metrics["auc"]),
+            "reasoning_auc": float(test_metrics["reasoning_auc"]),
             "accuracy": float(test_metrics["accuracy"]),
+            "reasoning_accuracy": float(test_metrics["reasoning_accuracy"]),
+            "gating_alpha": float(test_metrics["gating_alpha"]),
+            "convergence_delta": float(test_metrics["convergence_delta"]),
         }
     }
 

@@ -1,4 +1,18 @@
-import torch
+"""RADAR Preprocessing Module.
+
+Design Decision (Research-Critical):
+    Frequency features are computed ON-THE-FLY only via `compute_frequency_spectrum`
+    in model.py. This ensures bit-identical processing during training and inference,
+    eliminating distribution mismatch that could invalidate experimental results.
+
+    Only edge (Sobel) features support optional caching, as their computation is
+    deterministic and matches the on-the-fly implementation exactly.
+
+References:
+    - compute_frequency_spectrum() in model.py: canonical FFT with high-pass filter
+    - BoundaryArtifactDetector.forward() in model.py: on-the-fly Sobel computation
+"""
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -6,53 +20,27 @@ from typing import Optional
 import hashlib
 
 
-class FrequencyExtractor:
-    """
-    This preprocessing version supports both DCT and FFT for flexibility.
-
-    For inference, FrequencyArtifactDetector in model.py uses the canonical FFT
-    implementation (see compute_frequency_spectrum), which applies a high-pass
-    filter to the frequency spectrum. By contrast, this preprocessing
-    FrequencyExtractor currently does not apply that high-pass filter, so the
-    cached frequency features produced here will systematically differ from the
-    on-the-fly features computed during inference.
-
-    Preprocessing is optional and only provides a speedup; models work correctly
-    without it. If strict numerical parity with compute_frequency_spectrum is
-    required, either avoid using this preprocessing cache or ensure that any
-    custom preprocessing step mirrors the same high-pass filtering used in model.py.
-    """
-    def __init__(self, use_dct: bool = False):
-        self.use_dct = use_dct
-        if use_dct:
-            import torch_dct
-            self.torch_dct = torch_dct
-
-    def __call__(self, image: np.ndarray) -> np.ndarray:
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image
-
-        gray_normalized = gray.astype(np.float32) / 255.0
-
-        if self.use_dct:
-            gray_tensor = torch.from_numpy(gray_normalized).unsqueeze(0).unsqueeze(0)
-            dct = self.torch_dct.dct_2d(gray_tensor)
-            freq_magnitude = torch.abs(dct).squeeze().numpy()
-        else:
-            fft = np.fft.fft2(gray_normalized)
-            fft_shifted = np.fft.fftshift(fft)
-            freq_magnitude = np.abs(fft_shifted)
-
-        freq_magnitude = np.log1p(freq_magnitude)
-        freq_magnitude = (freq_magnitude - freq_magnitude.min()) / (freq_magnitude.max() - freq_magnitude.min() + 1e-8)
-
-        return freq_magnitude.astype(np.float32)
-
-
 class EdgeExtractor:
+    """
+    Sobel edge extraction for boundary artifact detection.
+
+    Computes gradient magnitude using Sobel operators, with per-image normalization
+    to ensure consistent feature scaling without batch-dependent artifacts.
+
+    The normalization is per-image (not per-batch) to prevent sample interaction
+    leakage that could affect model generalization.
+    """
+
     def __call__(self, image: np.ndarray) -> np.ndarray:
+        """
+        Extract Sobel edge features from an image.
+
+        Args:
+            image: RGB image array (H, W, 3) or grayscale (H, W)
+
+        Returns:
+            Normalized Sobel magnitude map (H, W) in [0, 1]
+        """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
@@ -62,6 +50,7 @@ class EdgeExtractor:
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         sobel_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
 
+        # Per-image normalization (NOT batch-dependent)
         max_val = sobel_magnitude.max()
         if max_val > 0:
             sobel_normalized = (sobel_magnitude / max_val).astype(np.float32)
@@ -72,8 +61,22 @@ class EdgeExtractor:
 
 
 def preprocess_image(img_path: Path, output_dir: Path,
-                     freq_extractor: FrequencyExtractor,
                      edge_extractor: EdgeExtractor) -> bool:
+    """
+    Preprocess a single image and cache edge features.
+
+    Note: Frequency features are NOT cached. They are computed on-the-fly during
+    training/inference to ensure exact consistency with the high-pass filtered
+    FFT implementation in model.py.
+
+    Args:
+        img_path: Path to input image
+        output_dir: Directory to save cached features
+        edge_extractor: EdgeExtractor instance for Sobel computation
+
+    Returns:
+        True if successful, False otherwise
+    """
     try:
         with open(img_path, 'rb') as f:
             img_content = f.read()
@@ -85,15 +88,15 @@ def preprocess_image(img_path: Path, output_dir: Path,
 
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        freq_features = freq_extractor(image_rgb)
+        # Only cache edge features (frequency computed on-the-fly)
         edge_features = edge_extractor(image_rgb)
-
-        freq_path = output_dir / f"{img_hash}_freq.npy"
         edge_path = output_dir / f"{img_hash}_sobel.npy"
-
-        np.save(str(freq_path), freq_features)
         np.save(str(edge_path), edge_features)
 
         return True
     except Exception:
         return False
+
+
+# Backwards compatibility alias (deprecated)
+FrequencyExtractor = None  # Removed - use compute_frequency_spectrum() in model.py

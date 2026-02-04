@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /Users/karthik/Projects/AI\\\\ Stuff/RADAR/Deepfake\\\\ Research\\\\ Paper/RADAR-Clean && python3 -m py_compile:*)",
+      "Bash(cd:*)"
+    ]
+  }
+}

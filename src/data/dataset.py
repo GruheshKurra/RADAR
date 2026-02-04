@@ -6,10 +6,6 @@ from typing import List, Optional, Tuple, Dict, Union
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -61,14 +57,10 @@ class DeepfakeDataset(Dataset):
         total_count = len(self.image_paths)
 
         for idx, img_path in enumerate(self.image_paths):
-            freq_path = self._get_cache_path(img_path, "freq")
             sobel_path = self._get_cache_path(img_path, "sobel")
 
-            if freq_path is None or sobel_path is None or not (freq_path.exists() and sobel_path.exists()):
+            if sobel_path is None or not sobel_path.exists():
                 missing_count += 1
-
-        if missing_count > 0:
-            logger.warning(f"Missing preprocessed features for {missing_count}/{total_count} images")
 
     def _get_cache_path(self, img_path: Path, feature_type: str) -> Optional[Path]:
         if self.preprocess_dir is None:
@@ -103,7 +95,6 @@ class DeepfakeDataset(Dataset):
             img = Image.open(self.image_paths[idx]).convert("RGB")
             img_array = np.array(img)
         except Exception as e:
-            logger.error(f"Failed to load image {self.image_paths[idx]}: {e}")
             if idx + 1 < len(self.image_paths):
                 return self.__getitem__(idx + 1)
             img_array = np.zeros((224, 224, 3), dtype=np.uint8)
@@ -115,11 +106,7 @@ class DeepfakeDataset(Dataset):
 
         extras = {}
         if self.preprocess_dir:
-            freq_path = self._get_cache_path(self.image_paths[idx], "freq")
             sobel_path = self._get_cache_path(self.image_paths[idx], "sobel")
-
-            if freq_path is not None and freq_path.exists():
-                extras["freq_cached"] = torch.from_numpy(np.load(str(freq_path)))
 
             if sobel_path is not None and sobel_path.exists():
                 extras["sobel_cached"] = torch.from_numpy(np.load(str(sobel_path)))

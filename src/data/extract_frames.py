@@ -15,35 +15,34 @@ def extract_frames_from_video(video_path: Path, output_dir: Path,
     try:
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
-            print(f"Failed to open: {video_path}")
             return 0
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames == 0:
+            cap.release()
             return 0
 
-        # Sample frames uniformly
         frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-
-        extracted = 0
         video_name = video_path.stem
+        frames_to_write = []
 
         for idx, frame_idx in enumerate(frame_indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
-
-            if not ret:
-                continue
-
-            frame_path = output_dir / f"{video_name}_frame{idx:03d}.jpg"
-            cv2.imwrite(str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-            extracted += 1
+            if ret:
+                frame_path = output_dir / f"{video_name}_frame{idx:03d}.jpg"
+                frames_to_write.append((str(frame_path), frame, quality))
 
         cap.release()
+
+        extracted = 0
+        for frame_path, frame, qual in frames_to_write:
+            if cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, qual]):
+                extracted += 1
+
         return extracted
 
-    except Exception as e:
-        print(f"Error processing {video_path}: {e}")
+    except:
         return 0
 
 
@@ -53,7 +52,7 @@ def process_video_wrapper(args):
 
 
 def extract_ff_dataset(ff_root: Path, output_root: Path,
-                      num_frames: int = 10, num_workers: int = 4):
+                      num_frames: int = 10, num_workers: int = None):
     fake_folders = [
         "DeepFakeDetection",
         "Deepfakes",
@@ -64,7 +63,9 @@ def extract_ff_dataset(ff_root: Path, output_root: Path,
     ]
     real_folder = "original"
 
-    # Create output directories
+    if num_workers is None:
+        num_workers = max(1, mp.cpu_count())
+
     output_dataset = output_root / "ff_c23"
     real_dir = output_dataset / "real"
     fake_dir = output_dataset / "fake"
@@ -77,25 +78,31 @@ def extract_ff_dataset(ff_root: Path, output_root: Path,
     print(f"Frames per video: {num_frames}")
     print(f"Workers: {num_workers}")
 
-    # Process real videos
-    print("\n[1/2] Processing REAL videos...")
-    real_videos = list((ff_root / real_folder).glob("*.mp4"))
+    print("\n[1/2] Processing REAL videos (1000 expected)...")
+    real_path = ff_root / real_folder
+    real_videos = []
+    if real_path.exists():
+        real_videos = list(real_path.glob("*.mp4"))
     print(f"Found {len(real_videos)} real videos")
 
-    args_list = [(v, real_dir, num_frames, 95) for v in real_videos]
+    if real_videos:
+        args_list = [(v, real_dir, num_frames, 95) for v in real_videos]
+        chunk_size = max(1, len(args_list) // (num_workers * 4))
 
-    with mp.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(process_video_wrapper, args_list),
-            total=len(args_list),
-            desc="Real videos"
-        ))
+        with mp.Pool(num_workers) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(process_video_wrapper, args_list, chunksize=chunk_size),
+                total=len(args_list),
+                desc="Real videos"
+            ))
 
-    total_real_frames = sum(results)
-    print(f"Extracted {total_real_frames} real frames")
+        total_real_frames = sum(results)
+        print(f"Extracted {total_real_frames} real frames")
+    else:
+        total_real_frames = 0
+        print("No real videos found")
 
-    # Process fake videos
-    print("\n[2/2] Processing FAKE videos...")
+    print("\n[2/2] Processing FAKE videos (6000 expected)...")
     fake_videos = []
     for folder in fake_folders:
         folder_path = ff_root / folder
@@ -106,21 +113,27 @@ def extract_ff_dataset(ff_root: Path, output_root: Path,
 
     print(f"Total fake videos: {len(fake_videos)}")
 
-    args_list = [(v, fake_dir, num_frames, 95) for v in fake_videos]
+    if fake_videos:
+        args_list = [(v, fake_dir, num_frames, 95) for v in fake_videos]
+        chunk_size = max(1, len(args_list) // (num_workers * 4))
 
-    with mp.Pool(num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(process_video_wrapper, args_list),
-            total=len(args_list),
-            desc="Fake videos"
-        ))
+        with mp.Pool(num_workers) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(process_video_wrapper, args_list, chunksize=chunk_size),
+                total=len(args_list),
+                desc="Fake videos"
+            ))
 
-    total_fake_frames = sum(results)
-    print(f"Extracted {total_fake_frames} fake frames")
+        total_fake_frames = sum(results)
+        print(f"Extracted {total_fake_frames} fake frames")
+    else:
+        total_fake_frames = 0
+        print("No fake videos found")
 
-    # Summary
     print("\n" + "="*50)
     print("EXTRACTION COMPLETE")
+    print(f"Real videos processed: {len(real_videos)}/1000 expected")
+    print(f"Fake videos processed: {len(fake_videos)}/6000 expected")
     print(f"Real frames: {total_real_frames}")
     print(f"Fake frames: {total_fake_frames}")
     print(f"Total frames: {total_real_frames + total_fake_frames}")

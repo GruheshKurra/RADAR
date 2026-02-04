@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 import timm
 from typing import Dict, Optional
+import os
+from pathlib import Path
+
+os.environ['TORCH_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache')
+os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache' / 'hub')
 
 
 class ViTBaseline(nn.Module):

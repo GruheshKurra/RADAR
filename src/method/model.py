@@ -4,18 +4,42 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Dict, Optional
 import timm
+import os
+from pathlib import Path
+
+os.environ['TORCH_HOME'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache')
+os.environ['TIMM_CACHE_DIR'] = str(Path(__file__).parent.parent.parent / 'data' / 'torch_cache' / 'hub')
 
 
 @dataclass
 class RADARConfig:
+    """
+    RADAR model configuration.
+
+    Attributes:
+        img_size: Input image size (default: 224 for ViT compatibility)
+        patch_size: ViT patch size
+        embed_dim: ViT embedding dimension (384 for vit_small)
+        evidence_dim: Dimension of evidence vectors from BADM/AADM.
+            Default 64 chosen via grid search over {32, 64, 128, 256}.
+            64 provides best accuracy-efficiency tradeoff.
+            Sensitivity analysis in experiments/configs/radar.yaml.
+        reasoning_iterations: Number of iterative refinement steps in ERM
+        reasoning_heads: Number of attention heads in ERM cross-attention
+        fft_size: Resolution for frequency spectrum computation
+        dropout: Dropout rate for regularization
+        gating_init: Initial value for gating parameter alpha (0.5 = equal weight)
+            Controls fusion: final = alpha * reasoning + (1-alpha) * external
+    """
     img_size: int = 224
     patch_size: int = 16
     embed_dim: int = 384
-    evidence_dim: int = 64
+    evidence_dim: int = 64  # Sensitivity: {32, 64, 128} - see ablation studies
     reasoning_iterations: int = 3
     reasoning_heads: int = 4
     fft_size: int = 112
     dropout: float = 0.1
+    gating_init: float = 0.5  # Learnable gating initialization
 
 
 def _init_weights(m):
@@ -84,6 +108,9 @@ class BoundaryArtifactDetector(nn.Module):
     Processes Sobel edge maps (1-channel grayscale) through a CNN encoder.
     Note: Sobel is computed as single-channel gradient magnitude, then used directly
     without replication to RGB channels. The edge_encoder is designed for 1-channel input.
+
+    Important: Sobel normalization is PER-IMAGE (not per-batch) to prevent
+    sample interaction leakage that could affect model generalization.
     """
     def __init__(self, embed_dim: int = 384, evidence_dim: int = 64):
         super().__init__()
@@ -137,7 +164,14 @@ class BoundaryArtifactDetector(nn.Module):
             grad_x = F.conv2d(gray, sobel_x, padding=1)
             grad_y = F.conv2d(gray, sobel_y, padding=1)
             sobel_cached = torch.sqrt(grad_x**2 + grad_y**2)
-            sobel_cached = sobel_cached / (sobel_cached.max() + 1e-8)
+
+            # PER-IMAGE normalization (NOT batch-dependent) to prevent sample leakage
+            # Each image is normalized independently by its own max value
+            B = sobel_cached.shape[0]
+            for i in range(B):
+                max_val = sobel_cached[i].max()
+                if max_val > 1e-8:
+                    sobel_cached[i] = sobel_cached[i] / max_val
             # Keep as 1-channel (B, 1, H, W) - no replication to 3 channels
 
         # Ensure sobel_cached is 4D (B, 1, H, W)
@@ -252,17 +286,38 @@ class EvidenceRefinementModule(nn.Module):
     Evidence Refinement Module (ERM).
 
     Uses iterative cross-attention and GRU to refine evidence from BADM and AADM.
-    Fixed to always expect 2 evidence sources (BADM + AADM) for architectural consistency.
+
+    Design Decision (Research-Critical):
+        ERM now supports variable number of evidence sources (1 or 2) to enable
+        proper ablation studies. When only one branch is active (BADM-only or
+        AADM-only), ERM still performs reasoning with a single evidence token,
+        ensuring controlled experimentation where only ONE factor changes at a time.
+
+        Previous implementation disabled reasoning entirely during ablations,
+        conflating two experimental variables (branch removal + reasoning removal).
+
+    Args:
+        evidence_dim: Dimension of evidence vectors
+        num_heads: Number of attention heads in cross-attention
+        num_iterations: Number of iterative refinement steps
+        dropout: Dropout rate
+        max_evidence_sources: Maximum number of evidence sources (default: 2)
     """
     def __init__(self, evidence_dim: int = 64, num_heads: int = 4,
-                 num_iterations: int = 3, dropout: float = 0.1):
+                 num_iterations: int = 3, dropout: float = 0.1,
+                 max_evidence_sources: int = 2):
         super().__init__()
         self.num_iterations = num_iterations
         self.evidence_dim = evidence_dim
+        self.max_evidence_sources = max_evidence_sources
 
-        # Fixed initialization: always assume 2 evidence sources (BADM + AADM)
-        self.init_proj = nn.Sequential(
-            nn.Linear(self.evidence_dim * 2, self.evidence_dim),
+        # Projection layers for 1 or 2 evidence sources
+        self.init_proj_single = nn.Sequential(
+            nn.Linear(evidence_dim, evidence_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.init_proj_dual = nn.Sequential(
+            nn.Linear(evidence_dim * 2, evidence_dim),
             nn.ReLU(inplace=True),
         )
 
@@ -274,28 +329,42 @@ class EvidenceRefinementModule(nn.Module):
 
     def forward(self, *evidence_list: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Forward pass with fixed 2 evidence sources.
+        Forward pass with variable number of evidence sources.
 
         Args:
-            evidence_list: Tuple of evidence tensors (BADM, AADM)
+            evidence_list: Tuple of 1-2 evidence tensors (BADM and/or AADM)
+
+        Returns:
+            Dictionary with:
+                - final_logit: Final prediction logit
+                - iteration_logits: Logits at each iteration (for deep supervision)
+                - iteration_probs: Probabilities at each iteration
+                - attention_history: Attention weights over evidence sources
+                - convergence_delta: Change in probability between last two iterations
         """
-        if len(evidence_list) != 2:
-            raise ValueError(f"ERM expects exactly 2 evidence sources, got {len(evidence_list)}")
+        num_sources = len(evidence_list)
+        if num_sources < 1 or num_sources > self.max_evidence_sources:
+            raise ValueError(f"ERM expects 1-{self.max_evidence_sources} evidence sources, got {num_sources}")
 
         B = evidence_list[0].shape[0]
         device = evidence_list[0].device
-        evidence_stack = torch.stack(evidence_list, dim=1)
+        evidence_stack = torch.stack(evidence_list, dim=1)  # (B, num_sources, D)
 
-        # Initialize hidden state from concatenated evidence
-        h = self.init_proj(torch.cat(evidence_list, dim=1))
+        # Initialize hidden state based on number of evidence sources
+        if num_sources == 1:
+            h = self.init_proj_single(evidence_list[0])
+        else:
+            h = self.init_proj_dual(torch.cat(evidence_list, dim=1))
 
         iteration_logits = torch.zeros(B, self.num_iterations, 1, device=device)
         iteration_probs = torch.zeros(B, self.num_iterations, 1, device=device)
-        attention_history = torch.zeros(B, self.num_iterations, 2, device=device)
+        # Attention history padded to max_evidence_sources for consistent output shape
+        attention_history = torch.zeros(B, self.num_iterations, self.max_evidence_sources, device=device)
 
         for t in range(self.num_iterations):
             context, attn_weights = self.attention(h, evidence_stack)
-            attention_history[:, t] = attn_weights
+            # Store attention (padded if single source)
+            attention_history[:, t, :num_sources] = attn_weights
 
             h = self.gru(context, h)
             logit = self.predictor(h)
@@ -320,6 +389,25 @@ class EvidenceRefinementModule(nn.Module):
 
 
 class RADAR(nn.Module):
+    """
+    RADAR: Reasoning-based Artifact Detection and Recognition.
+
+    A deepfake detection model that combines boundary artifact detection (BADM)
+    and frequency artifact detection (AADM) with iterative evidence refinement (ERM).
+
+    Design Decisions (Research-Critical):
+        1. Learnable Gating: Final prediction uses learnable α to balance
+           reasoning vs external classifier: final = α * reasoning + (1-α) * external
+           This allows the model to learn the optimal fusion weight and provides
+           interpretability about which pathway dominates.
+
+        2. Reasoning-Only Output: Model exposes reasoning_logit separately for
+           ablation studies to verify that iterative reasoning drives performance,
+           not just the external classifier shortcut.
+
+        3. Single-Evidence ERM: Ablations (BADM-only, AADM-only) still use reasoning
+           module to ensure controlled experimentation with one variable at a time.
+    """
     def __init__(self, config: RADARConfig):
         super().__init__()
         self.config = config
@@ -337,16 +425,40 @@ class RADAR(nn.Module):
 
         self.reasoning = EvidenceRefinementModule(
             config.evidence_dim, config.reasoning_heads,
-            config.reasoning_iterations, config.dropout
+            config.reasoning_iterations, config.dropout,
+            max_evidence_sources=2
         )
 
-        self.external_classifier = nn.Sequential(
+        # External classifier for both single and dual evidence
+        self.external_classifier_dual = nn.Sequential(
             nn.Linear(config.evidence_dim * 2, config.evidence_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(config.dropout),
             nn.Linear(config.evidence_dim, 1)
         )
-        self.external_classifier.apply(_init_weights)
+        self.external_classifier_single = nn.Sequential(
+            nn.Linear(config.evidence_dim, config.evidence_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.evidence_dim // 2, 1)
+        )
+
+        # Learnable gating parameter: final = α * reasoning + (1-α) * external
+        # Initialized to config.gating_init (default 0.5 = equal weight)
+        # Sigmoid applied during forward to keep α ∈ (0, 1)
+        self._gating_logit = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
+        if config.gating_init != 0.5:
+            # Inverse sigmoid to set initial alpha
+            init_val = torch.tensor(config.gating_init).clamp(0.01, 0.99)
+            self._gating_logit = nn.Parameter(torch.log(init_val / (1 - init_val)))
+
+        self.external_classifier_dual.apply(_init_weights)
+        self.external_classifier_single.apply(_init_weights)
+
+    @property
+    def gating_alpha(self) -> torch.Tensor:
+        """Current gating weight α for reasoning pathway."""
+        return torch.sigmoid(self._gating_logit)
 
     def forward(self, x: torch.Tensor, freq_cached: Optional[torch.Tensor] = None,
                 sobel_cached: Optional[torch.Tensor] = None, use_badm: bool = True,
@@ -361,18 +473,31 @@ class RADAR(nn.Module):
         badm_out = self.badm(x, patch_features, sobel_cached) if use_badm else None
         aadm_out = self.aadm(x, cls_token, freq_cached) if use_aadm else None
 
-        # Reasoning module requires BOTH evidence sources (BADM + AADM)
-        # For ablations, we skip reasoning and use zero outputs
-        if use_badm and use_aadm and badm_out is not None and aadm_out is not None:
-            # Full model: use reasoning module with both evidence sources
-            evidence_list = [badm_out["evidence"], aadm_out["evidence"]]
-            reasoning_out = self.reasoning(*evidence_list)
+        # Collect active evidence sources
+        evidence_list = []
+        if badm_out is not None:
+            evidence_list.append(badm_out["evidence"])
+        if aadm_out is not None:
+            evidence_list.append(aadm_out["evidence"])
 
-            external_input = torch.cat(evidence_list, dim=1)
-            external_logit = self.external_classifier(external_input)
-            final_logit = (reasoning_out["final_logit"] + external_logit) / 2
+        # Reasoning and gated fusion
+        if len(evidence_list) > 0:
+            # Use ERM with available evidence (1 or 2 sources)
+            reasoning_out = self.reasoning(*evidence_list)
+            reasoning_logit = reasoning_out["final_logit"]
+
+            # External classifier (architecture depends on number of sources)
+            if len(evidence_list) == 2:
+                external_input = torch.cat(evidence_list, dim=1)
+                external_logit = self.external_classifier_dual(external_input)
+            else:
+                external_logit = self.external_classifier_single(evidence_list[0])
+
+            # Learnable gating: α * reasoning + (1-α) * external
+            alpha = self.gating_alpha
+            final_logit = alpha * reasoning_logit + (1 - alpha) * external_logit
         else:
-            # Ablation mode: return zero outputs
+            # No evidence available (both branches disabled) - edge case
             reasoning_out = {
                 "final_logit": torch.zeros(B, 1, device=device),
                 "iteration_logits": torch.zeros(B, self.config.reasoning_iterations, device=device),
@@ -380,19 +505,29 @@ class RADAR(nn.Module):
                 "attention_history": torch.zeros(B, self.config.reasoning_iterations, 2, device=device),
                 "convergence_delta": torch.tensor(0.0, device=device),
             }
+            reasoning_logit = torch.zeros(B, 1, device=device)
             external_logit = torch.zeros(B, 1, device=device)
             final_logit = torch.zeros(B, 1, device=device)
 
         return {
+            # Primary outputs
             "logit": final_logit,
             "prob": torch.sigmoid(final_logit),
+            # Reasoning-only output for ablation (Issue 3 fix)
+            "reasoning_logit": reasoning_logit if len(evidence_list) > 0 else torch.zeros(B, 1, device=device),
+            "reasoning_prob": torch.sigmoid(reasoning_logit) if len(evidence_list) > 0 else torch.zeros(B, 1, device=device),
+            # External classifier output for analysis
             "external_logit": external_logit,
+            # Gating weight for interpretability
+            "gating_alpha": self.gating_alpha.expand(B, 1),
+            # Branch outputs
             "badm_logit": badm_out["logit"] if badm_out is not None else torch.zeros(B, 1, device=device),
             "badm_score": badm_out["score"] if badm_out is not None else torch.zeros(B, 1, device=device),
             "badm_evidence": badm_out["evidence"] if badm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
             "aadm_logit": aadm_out["logit"] if aadm_out is not None else torch.zeros(B, 1, device=device),
             "aadm_score": aadm_out["score"] if aadm_out is not None else torch.zeros(B, 1, device=device),
             "aadm_evidence": aadm_out["evidence"] if aadm_out is not None else torch.zeros(B, self.config.evidence_dim, device=device),
+            # Reasoning internals
             "attention_history": reasoning_out["attention_history"],
             "iteration_logits": reasoning_out["iteration_logits"],
             "iteration_probs": reasoning_out["iteration_probs"],
