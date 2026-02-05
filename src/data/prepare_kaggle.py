@@ -15,20 +15,36 @@ from utils.logging import print_section, print_complete, print_result
 def reorganize_dataset(input_dir: Path, output_dir: Path):
     """Reorganize Kaggle structure to training structure."""
 
-    # Kaggle structure: real_and_fake_face/training_real/, training_fake/, etc.
-    kaggle_root = input_dir / "real_and_fake_face"
+    # Actual Kaggle structure: real_vs_fake/real-vs-fake/train/, valid/, test/
+    kaggle_root = input_dir / "real_vs_fake" / "real-vs-fake"
+
     if not kaggle_root.exists():
-        # Alternative: files might be at root
-        kaggle_root = input_dir
+        # Fallback: try alternative structures
+        kaggle_root = input_dir / "real_and_fake_face"
+        if not kaggle_root.exists():
+            kaggle_root = input_dir
 
-    mappings = [
-        ("training_real", "train/real"),
-        ("training_fake", "train/fake"),
-        ("validation_real", "val/real"),
-        ("validation_fake", "val/fake"),
-    ]
+    # Check if already in train/real, train/fake format
+    if (kaggle_root / "train" / "real").exists() and (kaggle_root / "train" / "fake").exists():
+        print(f"Dataset already in correct format at {kaggle_root}")
+        mappings = [
+            ("train/real", "train/real"),
+            ("train/fake", "train/fake"),
+            ("valid/real", "val/real"),
+            ("valid/fake", "val/fake"),
+            ("test/real", "test/real"),
+            ("test/fake", "test/fake"),
+        ]
+    else:
+        # Old format
+        mappings = [
+            ("training_real", "train/real"),
+            ("training_fake", "train/fake"),
+            ("validation_real", "val/real"),
+            ("validation_fake", "val/fake"),
+        ]
 
-    stats = {"train": {"real": 0, "fake": 0}, "val": {"real": 0, "fake": 0}}
+    stats = {"train": {"real": 0, "fake": 0}, "val": {"real": 0, "fake": 0}, "test": {"real": 0, "fake": 0}}
 
     for src_name, dst_path in mappings:
         src_dir = kaggle_root / src_name
@@ -41,7 +57,10 @@ def reorganize_dataset(input_dir: Path, output_dir: Path):
 
         images = list(src_dir.glob("*.jpg")) + list(src_dir.glob("*.png"))
 
-        split, class_name = dst_path.split("/")
+        parts = dst_path.split("/")
+        split = parts[0] if parts[0] in ["train", "val", "test"] else "train"
+        class_name = parts[1] if len(parts) > 1 else "fake"
+
         print(f"\nCopying {src_name} ({len(images)} images)...")
 
         for img_path in tqdm(images, desc=f"  {src_name}"):
@@ -55,6 +74,8 @@ def reorganize_dataset(input_dir: Path, output_dir: Path):
 
 def create_metadata(output_dir: Path, stats: dict):
     """Save dataset metadata."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     metadata = {
         "dataset": "Kaggle 140k Real and Fake Faces",
         "source": "https://www.kaggle.com/datasets/xhlulu/140k-real-and-fake-faces",

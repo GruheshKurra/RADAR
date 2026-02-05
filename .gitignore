@@ -17,10 +17,10 @@ build/
 .github/
 .claude/
 
-# Data and outputs
-data/
-outputs/
-exports/
+# Data and outputs (root level only)
+/data/
+/outputs/
+/exports/
 *.zip
 
 # Cache directories
