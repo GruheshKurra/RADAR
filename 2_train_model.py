@@ -98,12 +98,17 @@ def train_model(model, train_loader, val_loader, config, device, output_dir):
 
         epoch_time = time.time() - epoch_start
 
-        print(f"\nEpoch {epoch+1} Summary:")
-        print(f"  Train Loss: {train_losses['total']:.4f}")
-        print(f"  Val AUC: {val_metrics['auc']:.4f}")
-        print(f"  Val Acc: {val_metrics['accuracy']:.4f}")
-        print(f"  Time: {epoch_time:.1f}s")
-        print(f"  Skipped batches: {skipped}")
+        print(f"\n{'='*70}")
+        print(f"Epoch {epoch+1}/{config['num_epochs']} Summary:")
+        print(f"{'='*70}")
+        print(f"  Train Loss:      {train_losses['total']:.4f}")
+        print(f"  Val AUC:         {val_metrics['auc']:.4f}")
+        print(f"  Val Accuracy:    {val_metrics['accuracy']:.2%}")
+        print(f"  Epoch Time:      {epoch_time:.1f}s")
+        print(f"  Samples/sec:     {len(train_loader.dataset) / epoch_time:.1f}")
+        if skipped > 0:
+            print(f"  Skipped batches: {skipped}")
+        print(f"{'='*70}")
 
         history["train_loss"].append(train_losses['total'])
         history["val_auc"].append(val_metrics['auc'])

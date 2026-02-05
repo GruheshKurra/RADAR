@@ -138,8 +138,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
     all_labels = torch.cat(all_labels, dim=0).numpy()
     all_preds = (all_probs > 0.5).astype(int)
     all_reasoning_preds = (all_reasoning_probs > 0.5).astype(int)
-    avg_convergence_delta = torch.cat(all_convergence_deltas, dim=0).mean().item()
-    avg_gating_alpha = torch.cat(all_gating_alphas, dim=0).mean().item()
+
+    # Use stack for scalar tensors, not cat
+    avg_convergence_delta = torch.stack(all_convergence_deltas).mean().item()
+    avg_gating_alpha = torch.stack(all_gating_alphas).mean().item()
 
     from sklearn.metrics import accuracy_score, roc_auc_score
 
