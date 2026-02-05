@@ -10,6 +10,7 @@ import json
 from typing import Dict, Tuple
 import sys
 import os
+from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -34,7 +35,8 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
 
     optimizer.zero_grad(set_to_none=True)
 
-    for batch_idx, batch_data in enumerate(loader):
+    pbar = tqdm(enumerate(loader), total=len(loader), desc="Training", unit="batch")
+    for batch_idx, batch_data in pbar:
         if len(batch_data) == 3:
             images, labels, extras = batch_data
             # Note: freq_cached is no longer used (on-the-fly only)
@@ -80,6 +82,12 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
             scheduler.step()
             accumulated_batches = 0
 
+        # Update progress bar
+        if num_batches > 0:
+            avg_loss = total_losses["total"] / num_batches
+            pbar.set_postfix({"loss": f"{avg_loss:.4f}", "skipped": skipped_batches})
+
+    pbar.close()
     avg_grad_norm = total_grad_norm / grad_norm_count if grad_norm_count > 0 else 0.0
     return {k: v / num_batches for k, v in total_losses.items()}, skipped_batches, avg_grad_norm
 
@@ -102,7 +110,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
     all_convergence_deltas = []
     all_gating_alphas = []
 
-    for batch_data in loader:
+    pbar = tqdm(loader, desc="Evaluating", unit="batch")
+    for batch_data in pbar:
         if len(batch_data) == 3:
             images, labels, extras = batch_data
             # Note: freq_cached is no longer used (on-the-fly only)
@@ -123,6 +132,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
         all_convergence_deltas.append(outputs["convergence_delta"].cpu())
         all_gating_alphas.append(outputs["gating_alpha"].cpu())
 
+    pbar.close()
     all_probs = torch.cat(all_probs, dim=0).numpy()
     all_reasoning_probs = torch.cat(all_reasoning_probs, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
