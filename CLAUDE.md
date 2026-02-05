@@ -6,6 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RADAR (Reasoning and Artifact Detection for Deepfake Recognition) is a deep learning research implementation for deepfake detection. It uses dual artifact detection modules (boundary and frequency) with iterative evidence refinement through a reasoning module. The architecture achieves 99.88%+ validation AUC on the Kaggle 140k dataset.
 
+## Important: Dataset Difficulty & Challenging Evaluation
+
+**Critical Issue with Kaggle 140k:**
+- The Kaggle 140k dataset is **too easy** for modern detection methods
+- All baselines and ablations achieve 99%+ AUC, making differentiation impossible
+- Limited to StyleGAN fakes, lacks diversity in manipulation methods
+- **Result**: Cannot prove RADAR's components actually provide value
+
+**Recommended Solution:**
+Create a **mixed challenging dataset** combining multiple sources:
+- FaceForensics++ (c23): 6 different manipulation methods
+- Celeb-DF v2: High-quality celebrity fakes
+- DFDC: Real-world, compressed scenarios
+- Optional: Kaggle 140k (small portion for easy samples)
+
+This provides a proper difficulty gradient where ablations show meaningful differences.
+
 ## Key Architecture Insights
 
 ### Three-Component Design
@@ -492,6 +509,244 @@ data/faceforensics/
 └── fake/  (all fake images)
 ```
 Code automatically splits using `create_stratified_split()`.
+
+## Creating Challenging Mixed Datasets
+
+### Why Mix Datasets?
+
+**Problem with Single-Source Datasets:**
+- Kaggle 140k: Too easy, all methods get 99%+ AUC
+- Cannot distinguish between approaches
+- No cross-dataset generalization testing
+- Limited manipulation diversity
+
+**Solution: Multi-Source Mixed Dataset**
+- Combines easy, medium, and hard examples
+- Multiple manipulation methods (Deepfakes, Face2Face, FaceSwap, etc.)
+- Real-world compression artifacts
+- Meaningful ablation differences
+
+### Recommended Dataset Mix
+
+```python
+DATASET_MIX = {
+    "faceforensics_c23": 0.40,    # 40% - Standard benchmark, 6 methods
+    "celeb_df_v2": 0.30,          # 30% - High quality fakes
+    "dfdc": 0.20,                 # 20% - Real-world, compressed
+    "kaggle_140k": 0.10,          # 10% - Easy samples for sanity check
+}
+```
+
+### Dataset Creation Workflow
+
+**Step 1: Create Mixed Dataset Locally**
+
+```bash
+python create_mixed_dataset.py \
+  --faceforensics /path/to/faceforensics_c23 \
+  --celeb_df /path/to/celeb_df_v2 \
+  --dfdc /path/to/dfdc \
+  --kaggle_140k ./data/kaggle_140k_prepared \
+  --output_dir ./data/multi_deepfake_v1 \
+  --target_total 200000 \
+  --seed 42
+```
+
+**Output Structure:**
+```
+data/multi_deepfake_v1/
+├── metadata.json              # Detailed statistics
+├── train/
+│   ├── real/
+│   │   ├── face_00001.jpg    # Prefix indicates source
+│   │   ├── cele_00001.jpg
+│   │   ├── dfdc_00001.jpg
+│   │   └── kagg_00001.jpg
+│   └── fake/
+│       ├── face_deepfakes_00001.jpg
+│       ├── face_face2face_00001.jpg
+│       ├── cele_fake_00001.jpg
+│       └── ...
+├── val/
+│   ├── real/
+│   └── fake/
+└── test/
+    ├── real/
+    └── fake/
+```
+
+**Step 2: Upload to Hugging Face**
+
+```bash
+# First time: Login to Hugging Face
+huggingface-cli login
+
+# Upload dataset
+python upload_to_huggingface.py \
+  --dataset_dir ./data/multi_deepfake_v1 \
+  --repo_name username/multi-deepfake-v1 \
+  --token YOUR_HF_TOKEN \
+  --commit_message "Upload mixed dataset v1"
+```
+
+**Step 3: Download on Remote Server (RunPod/SSH)**
+
+```bash
+# On your RunPod/SSH server
+python download_from_huggingface.py \
+  --repo_name username/multi-deepfake-v1 \
+  --output_dir ./data/multi_deepfake_v1 \
+  --token YOUR_HF_TOKEN \
+  --num_workers 8
+
+# Train immediately after download
+python 2_train_model.py \
+  --data_dir ./data/multi_deepfake_v1 \
+  --experiment_name radar_mixed_v1 \
+  --num_epochs 50 \
+  --batch_size 128
+```
+
+### Expected Results on Mixed Dataset
+
+**Baseline Performance (predicted):**
+- ViT-Small: ~85-90% AUC
+- ResNet50: ~82-88% AUC
+- EfficientNet: ~83-89% AUC
+
+**RADAR Ablations (predicted):**
+- BADM only: ~88-92% AUC
+- AADM only: ~86-90% AUC
+- Both (no reasoning): ~91-94% AUC
+- **Full RADAR: ~94-96% AUC**
+
+This provides **meaningful differentiation** (5-10% gaps) vs. Kaggle 140k where everything is 99%+.
+
+### Metadata Structure
+
+**metadata.json Contents:**
+```json
+{
+  "dataset_name": "multi_deepfake_v1",
+  "total_images": 200000,
+  "sources": {
+    "faceforensics_c23": {
+      "train_real": 16000,
+      "train_fake": 40000,
+      "val_real": 2400,
+      "val_fake": 6000,
+      "test_real": 2400,
+      "test_fake": 6000,
+      "methods": ["Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
+    },
+    "celeb_df_v2": {
+      "train_real": 12000,
+      "train_fake": 30000,
+      ...
+    }
+  },
+  "splits": {
+    "train": 0.70,
+    "val": 0.15,
+    "test": 0.15
+  },
+  "ratios": {
+    "faceforensics_c23": 0.40,
+    "celeb_df_v2": 0.30,
+    "dfdc": 0.20,
+    "kaggle_140k": 0.10
+  }
+}
+```
+
+### Hugging Face Integration
+
+**Authentication:**
+```bash
+# Store token permanently
+huggingface-cli login
+
+# Or use environment variable
+export HF_TOKEN="your_token_here"
+```
+
+**Python API Usage:**
+```python
+from datasets import load_dataset
+
+# Load dataset
+dataset = load_dataset("username/multi-deepfake-v1")
+
+# Access splits
+train_data = dataset['train']
+val_data = dataset['validation']
+test_data = dataset['test']
+
+# Iterate
+for sample in train_data:
+    image = sample['image']  # PIL Image
+    label = sample['label']  # 0=real, 1=fake
+```
+
+**Advantages of Hugging Face:**
+- Automatic chunking for large files
+- Resume capability on network failures
+- Version control (tags/branches)
+- Easy sharing with collaborators
+- CDN for fast downloads
+
+### Dataset Quality Checks
+
+**Before uploading, verify:**
+```python
+# Check class balance
+python -c "
+import json
+from pathlib import Path
+
+with open('data/multi_deepfake_v1/metadata.json') as f:
+    meta = json.load(f)
+
+for split, stats in meta['actual_totals'].items():
+    ratio = stats['fake'] / stats['real']
+    print(f'{split}: {stats[\"real\"]:,} real, {stats[\"fake\"]:,} fake (ratio: {ratio:.2f})')
+"
+
+# Verify no corrupt images
+python -c "
+from pathlib import Path
+from PIL import Image
+from tqdm import tqdm
+
+for img_path in tqdm(list(Path('data/multi_deepfake_v1').rglob('*.jpg'))):
+    try:
+        Image.open(img_path).verify()
+    except:
+        print(f'Corrupt: {img_path}')
+"
+```
+
+### Training Recommendations for Mixed Dataset
+
+**Longer Training:**
+- Increase `num_epochs` from 30 to 50-80
+- Mixed datasets need more time to converge
+
+**Learning Rate:**
+- Keep 0.0005 or reduce to 0.0003
+- More stable on diverse data
+
+**Early Stopping:**
+- Increase `patience` from 10 to 15-20
+- Validation curves may be noisier
+
+**Augmentation:**
+- Mixed datasets already have diversity
+- Can reduce augmentation intensity slightly
+
+**Expected Training Time:**
+- 200k images: ~4-6 hours on A40 (50 epochs)
+- Monitor convergence carefully
 
 ## Training Pipeline Details
 
