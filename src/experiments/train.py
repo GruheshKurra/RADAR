@@ -39,7 +39,6 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
     for batch_idx, batch_data in pbar:
         if len(batch_data) == 3:
             images, labels, extras = batch_data
-            # Note: freq_cached is no longer used (on-the-fly only)
             sobel_cached = extras.get("sobel_cached").to(device, non_blocking=True) if "sobel_cached" in extras else None
         else:
             images, labels = batch_data
@@ -82,7 +81,6 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
             scheduler.step()
             accumulated_batches = 0
 
-        # Update progress bar
         if num_batches > 0:
             avg_loss = total_losses["total"] / num_batches
             pbar.set_postfix({"loss": f"{avg_loss:.4f}", "skipped": skipped_batches})
@@ -95,17 +93,8 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
 @torch.inference_mode()
 def evaluate(model: nn.Module, loader: DataLoader, device: str,
             use_badm: bool = True, use_aadm: bool = True) -> Dict:
-    """
-    Evaluate model on a data loader.
-
-    Returns metrics for:
-        - Final prediction (gated fusion)
-        - Reasoning-only prediction (for ablation analysis)
-        - Gating alpha value
-        - Convergence delta
-    """
     all_probs = []
-    all_reasoning_probs = []  # For reasoning-only ablation
+    all_reasoning_probs = []
     all_labels = []
     all_convergence_deltas = []
     all_gating_alphas = []
@@ -114,7 +103,6 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
     for batch_data in pbar:
         if len(batch_data) == 3:
             images, labels, extras = batch_data
-            # Note: freq_cached is no longer used (on-the-fly only)
             sobel_cached = extras.get("sobel_cached").to(device) if "sobel_cached" in extras else None
         else:
             images, labels = batch_data
@@ -145,16 +133,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
     from sklearn.metrics import accuracy_score, roc_auc_score
 
     return {
-        # Main metrics (gated fusion)
         "accuracy": accuracy_score(all_labels, all_preds),
         "auc": roc_auc_score(all_labels, all_probs),
-        # Reasoning-only metrics (for ablation - Issue 3)
         "reasoning_accuracy": accuracy_score(all_labels, all_reasoning_preds),
         "reasoning_auc": roc_auc_score(all_labels, all_reasoning_probs),
-        # Interpretability
         "gating_alpha": avg_gating_alpha,
         "convergence_delta": avg_convergence_delta,
-        # Raw data
         "probs": all_probs,
         "reasoning_probs": all_reasoning_probs,
         "labels": all_labels,

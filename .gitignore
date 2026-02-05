@@ -26,3 +26,6 @@ build/
 # Cache directories
 *_cache/
 .cache/
+trash/
+.cursor/
+.agent/
