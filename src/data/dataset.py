@@ -19,7 +19,7 @@ def get_train_transforms(img_size: int = 224):
         A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, p=0.3),
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-            A.ImageCompression(quality_lower=70, quality_upper=100, p=1.0),
+            A.ImageCompression(quality_range=(70, 100), p=1.0),
         ], p=0.3),
         A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02, p=0.3),
         A.Normalize(mean=list(IMAGENET_MEAN), std=list(IMAGENET_STD)),
