@@ -46,7 +46,9 @@ class EvidenceCrossAttention(nn.Module):
         out = (attn @ V).transpose(1, 2).contiguous().view(B, 1, -1)
         out = self.out_proj(out.squeeze(1))
 
-        return out, attn.squeeze(1).mean(dim=1)
+        # Average attention weights across heads and remove singleton dimension
+        attn_weights = attn.mean(dim=1).squeeze(1)  # [B, num_evidence]
+        return out, attn_weights
 
 
 class EvidenceRefinementModule(nn.Module):
