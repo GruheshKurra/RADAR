@@ -19,7 +19,6 @@ build/
 
 # Data and outputs (root level only)
 /data/
-/outputs/
 /exports/
 *.zip
 
