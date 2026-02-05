@@ -159,7 +159,7 @@ def main():
         "experiment_name": args.experiment_name,
         "seed": args.seed,
         "data_dir": args.data_dir,
-        "source_domain": "wilddeepfake",
+        "source_domain": "default",  # Only used for single-domain structure, not pre-split
         "img_size": 224,
         "patch_size": 16,
         "embed_dim": 384,
