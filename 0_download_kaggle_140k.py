@@ -4,7 +4,10 @@
 import argparse
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from utils.logging import print_section, print_complete
@@ -33,15 +36,43 @@ def download_dataset(output_dir: Path):
     subprocess.run(cmd, check=True)
 
 
-def unzip_dataset(output_dir: Path):
-    """Unzip downloaded dataset."""
+def extract_file(args):
+    """Extract a single file from zip (worker function)."""
+    zip_path, member, output_dir = args
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extract(member, output_dir)
+    return member
+
+
+def unzip_dataset(output_dir: Path, max_workers: int = 16):
+    """Unzip dataset using parallel extraction for speed."""
     zip_file = output_dir / "140k-real-and-fake-faces.zip"
     if not zip_file.exists():
         raise FileNotFoundError(f"Zip file not found: {zip_file}")
 
-    cmd = ["unzip", "-q", str(zip_file), "-d", str(output_dir)]
-    subprocess.run(cmd, check=True)
+    print(f"Extracting with {max_workers} parallel workers...")
+
+    # Get list of all files in zip
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        members = zip_ref.namelist()
+
+    total_files = len(members)
+    print(f"Total files: {total_files:,}")
+
+    # Parallel extraction
+    tasks = [(zip_file, member, output_dir) for member in members]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(extract_file, task) for task in tasks]
+
+        # Progress bar
+        with tqdm(total=total_files, desc="Extracting", unit="files") as pbar:
+            for future in as_completed(futures):
+                future.result()
+                pbar.update(1)
+
     zip_file.unlink()
+    print("✓ Extraction complete!")
 
 
 def main():
@@ -65,8 +96,8 @@ def main():
         print("\nDownloading from Kaggle...")
         download_dataset(output_dir)
 
-        print("Unzipping...")
-        unzip_dataset(output_dir)
+        print("\nUnzipping (parallel extraction)...")
+        unzip_dataset(output_dir, max_workers=16)
 
         print_complete(
             "DOWNLOAD COMPLETE",
