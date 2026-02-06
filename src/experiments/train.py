@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 from pathlib import Path
 import time
 import json
@@ -47,7 +47,7 @@ def train_epoch(model: nn.Module, loader: DataLoader, optimizer, scheduler,
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        with autocast(device_type=device, enabled=(device=="cuda")):
+        with autocast(enabled=(device=="cuda")):
             outputs = model(images, freq_cached=None, sobel_cached=sobel_cached,
                            use_badm=config.get("use_badm", True),
                            use_aadm=config.get("use_aadm", True))
@@ -110,7 +110,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str,
 
         images = images.to(device)
 
-        with autocast(device_type=device, enabled=(device=="cuda")):
+        with autocast(enabled=(device=="cuda")):
             outputs = model(images, freq_cached=None, sobel_cached=sobel_cached,
                            use_badm=use_badm, use_aadm=use_aadm)
 

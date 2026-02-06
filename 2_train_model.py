@@ -27,7 +27,7 @@ from data.splits import load_domain_data, create_stratified_split, load_presplit
 from experiments.train import train_epoch as _train_epoch, evaluate as _evaluate
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 from sklearn.metrics import roc_auc_score, accuracy_score
 
 
